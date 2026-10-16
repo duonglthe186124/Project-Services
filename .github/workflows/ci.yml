@@ -1,0 +1,29 @@
+name: AuthService CI
+
+on:
+  push:
+    branches: [ "main", "master", "develop" ]
+  pull_request:
+    branches: [ "main", "master", "develop" ]
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 1. Checkout code
+        uses: actions/checkout@v4
+
+      - name: 2. Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: 3. Restore dependencies
+        run: dotnet restore
+
+      - name: 4. Build project
+        run: dotnet build --no-restore --configuration Release
+
+      - name: 5. Verify Docker Image build
+        run: docker build -t auth-service:ci .

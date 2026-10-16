@@ -1,0 +1,11 @@
+services:
+  auth-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: auth-service
+    ports:
+      - "5265:8080"
+    env_file:
+      - .env
+    restart: unless-stopped
