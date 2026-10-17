@@ -1,7 +1,7 @@
 services:
   auth-service:
     build:
-      context: .
+      context: ./AuthService
       dockerfile: Dockerfile
     container_name: auth-service
     ports:

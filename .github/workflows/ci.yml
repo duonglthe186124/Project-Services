@@ -1,4 +1,4 @@
-name: AuthService CI
+name: Project Services CI
 
 on:
   push:
@@ -20,10 +20,10 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: 3. Restore dependencies
-        run: dotnet restore
+        run: dotnet restore AuthService/AuthService.csproj
 
       - name: 4. Build project
-        run: dotnet build --no-restore --configuration Release
+        run: dotnet build AuthService/AuthService.csproj --no-restore --configuration Release
 
       - name: 5. Verify Docker Image build
-        run: docker build -t auth-service:ci .
+        run: docker build -t auth-service:ci AuthService/
