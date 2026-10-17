@@ -9,6 +9,9 @@ using MongoDB.Driver;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Luôn nạp appsettings.Development.json (nếu có trên máy local) để đọc cấu hình bí mật khi dev
+builder.Configuration.AddJsonFile("appsettings.Development.json", optional: true, reloadOnChange: true);
+
 // 1. Dependency Injection
 builder.Services.AddScoped<ICatalogService, ProductCatalogService>();
 
@@ -85,10 +88,16 @@ builder.Services.AddSwaggerGen(c =>
 builder.Services.AddSingleton<IMongoDatabase>(sp =>
 {
     var config = sp.GetRequiredService<IConfiguration>();
-    var connectionString = config["CatalogDbSettings:ConnectionString"]
-                           ?? config["MongoDbSettings:ConnectionString"]
-                           ?? "mongodb://localhost:27017";
-    var databaseName = config["CatalogDbSettings:DatabaseName"] ?? "CatalogDb";
+    var connectionString = config["CatalogDbSettings:ConnectionString"];
+    if (string.IsNullOrWhiteSpace(connectionString))
+        connectionString = config["MongoDbSettings:ConnectionString"];
+
+    if (string.IsNullOrWhiteSpace(connectionString))
+        throw new InvalidOperationException("Chưa cấu hình ConnectionString cho MongoDB! Hãy đảm bảo chạy với ASPNETCORE_ENVIRONMENT=Development hoặc cấu hình trong .env.");
+
+    var databaseName = config["CatalogDbSettings:DatabaseName"];
+    if (string.IsNullOrWhiteSpace(databaseName)) databaseName = "CatalogDb";
+
     var client = new MongoClient(connectionString);
     return client.GetDatabase(databaseName);
 });
@@ -117,12 +126,9 @@ catch (Exception ex)
     app.Logger.LogWarning(ex, "Lỗi khi khởi tạo index hoặc seed data cho CatalogService.");
 }
 
-// 7. HTTP Pipeline
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "CatalogService v1"));
-}
+// 7. HTTP Pipeline: Bật Swagger cho cả Development và local test
+app.UseSwagger();
+app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "CatalogService v1"));
 
 app.UseCors("AllowAll");
 app.UseAuthentication();
