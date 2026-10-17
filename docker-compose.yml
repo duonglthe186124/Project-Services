@@ -9,3 +9,14 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+
+  catalog-service:
+    build:
+      context: ./CatalogService
+      dockerfile: Dockerfile
+    container_name: catalog-service
+    ports:
+      - "5266:8080"
+    env_file:
+      - .env
+    restart: unless-stopped

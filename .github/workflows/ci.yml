@@ -20,10 +20,16 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: 3. Restore dependencies
-        run: dotnet restore AuthService/AuthService.csproj
+        run: |
+          dotnet restore AuthService/AuthService.csproj
+          dotnet restore CatalogService/CatalogService.csproj
 
-      - name: 4. Build project
-        run: dotnet build AuthService/AuthService.csproj --no-restore --configuration Release
+      - name: 4. Build projects
+        run: |
+          dotnet build AuthService/AuthService.csproj --no-restore --configuration Release
+          dotnet build CatalogService/CatalogService.csproj --no-restore --configuration Release
 
-      - name: 5. Verify Docker Image build
-        run: docker build -t auth-service:ci AuthService/
+      - name: 5. Verify Docker Images build
+        run: |
+          docker build -t auth-service:ci AuthService/
+          docker build -t catalog-service:ci CatalogService/
