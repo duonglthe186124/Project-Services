@@ -18,6 +18,10 @@ public class User
     [BsonElement("isEmailVerified")]
     public bool IsEmailVerified { get; set; } = false;
 
+    // Phân quyền: "Customer" (mặc định) hoặc "Admin"
+    [BsonElement("role")]
+    public string Role { get; set; } = "Customer";
+
     // Dành cho OTP đăng ký
     [BsonElement("verificationOtp")]
     public string? VerificationOtp { get; set; }

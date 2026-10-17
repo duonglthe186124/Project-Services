@@ -84,6 +84,15 @@ public record AuthResponse(
     DateTime RefreshTokenExpiresAt,
     string Email,
     string FullName,
+    string Role,
     string UserId);
 
-public record UserProfileResponse(string UserId, string Email, string FullName, bool IsEmailVerified, bool HasPassword, bool IsGoogleLinked, DateTime CreatedAt);
+public record UserProfileResponse(
+    string UserId,
+    string Email,
+    string FullName,
+    string Role,
+    bool IsEmailVerified,
+    bool HasPassword,
+    bool IsGoogleLinked,
+    DateTime CreatedAt);

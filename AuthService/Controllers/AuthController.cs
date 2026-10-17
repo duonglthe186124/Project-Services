@@ -89,6 +89,7 @@ public class AuthController : ControllerBase
                 Email = email,
                 PasswordHash = BCrypt.Net.BCrypt.HashPassword(req.Password),
                 FullName = req.FullName.Trim(),
+                Role = "Customer",
                 IsEmailVerified = false,
                 VerificationOtp = otp,
                 OtpExpiresAt = now.AddMinutes(_otpExpiryMinutes),
@@ -369,6 +370,7 @@ public class AuthController : ControllerBase
                     Email = email,
                     FullName = payload.Name,
                     GoogleId = payload.Subject,
+                    Role = "Customer",
                     IsEmailVerified = true
                 };
 
@@ -418,6 +420,7 @@ public class AuthController : ControllerBase
             user.Id!,
             user.Email,
             user.FullName ?? "",
+            string.IsNullOrEmpty(user.Role) ? "Customer" : user.Role,
             user.IsEmailVerified,
             !string.IsNullOrEmpty(user.PasswordHash),
             !string.IsNullOrEmpty(user.GoogleId),
@@ -508,7 +511,9 @@ public class AuthController : ControllerBase
         return new AuthResponse(
             access.Token, access.ExpiresAt,
             refresh.Token, refresh.ExpiresAt,
-            user.Email, user.FullName ?? "", user.Id!);
+            user.Email, user.FullName ?? "",
+            string.IsNullOrEmpty(user.Role) ? "Customer" : user.Role,
+            user.Id!);
     }
 
     private string? GetCurrentUserId()

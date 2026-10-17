@@ -57,7 +57,8 @@ public class TokenService : ITokenService
             new Claim(JwtRegisteredClaimNames.Sub, user.Id ?? ""),
             new Claim(JwtRegisteredClaimNames.Email, user.Email ?? ""),
             new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
-            new Claim("fullName", user.FullName ?? string.Empty)
+            new Claim("fullName", user.FullName ?? string.Empty),
+            new Claim(ClaimTypes.Role, string.IsNullOrEmpty(user.Role) ? "Customer" : user.Role)
         };
 
         var expiresAt = DateTime.UtcNow.AddMinutes(_config.GetValue("JwtSettings:ExpiryMinutes", 15));
