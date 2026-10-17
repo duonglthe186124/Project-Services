@@ -14,6 +14,11 @@ public class ProductFilterQuery
     public decimal? MaxPrice { get; set; }
     public bool? OnSale { get; set; }
     public string? Tag { get; set; }
+    
+    /// <summary>
+    /// Lọc theo trạng thái: null = mặc định chỉ lấy sản phẩm đang kinh doanh (true), false = đã ẩn
+    /// </summary>
+    public bool? IsActive { get; set; }
 
     // newest, price_asc, price_desc, rating
     public string? SortBy { get; set; } = "newest";
@@ -59,7 +64,9 @@ public record CreateProductRequest(
 
     List<string>? ImageUrls,
 
-    List<string>? Tags);
+    List<string>? Tags,
+
+    bool IsActive = true);
 
 public record UpdateProductRequest(
     [Required(ErrorMessage = "Tên giày là bắt buộc.")]
@@ -87,7 +94,7 @@ public record UpdateProductRequest(
 
     List<string>? Tags,
 
-    bool IsActive);
+    bool IsActive = true);
 
 public record SizeStockDto(
     [Range(30, 55, ErrorMessage = "Size giày phải từ 30 đến 55.")]

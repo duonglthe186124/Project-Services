@@ -39,14 +39,15 @@
 - **Port Docker:** `5266:8080` (Cổng local HTTP: `5266`)
 - **Database:** MongoDB `CatalogDb` (Collection: `Products`).
 - **Chức năng chính đã hoạt động:**
-  1. `GET /api/catalog/products`: Tra cứu danh mục, lọc theo `keyword`, `category`, `gender`, `color`, `size` (chỉ lấy size còn hàng), `minPrice`/`maxPrice`, `onSale`, `tag`, sắp xếp (`newest`, `price_asc`, `price_desc`, `rating`, `popular`), phân trang (`Page`, `PageSize`). (Public)
-  2. `GET /api/catalog/products/{id}`: Xem chi tiết đôi giày, bảng size tồn kho, album ảnh, đánh giá. (Public)
+  1. `GET /api/catalog/products`: Tra cứu danh mục, lọc theo `keyword`, `category`, `gender`, `color`, `size` (chỉ lấy size còn hàng), `minPrice`/`maxPrice`, `onSale`, `tag`, `isActive` (mặc định chỉ lấy sản phẩm đang bán, hỗ trợ xem sản phẩm bị ẩn), sắp xếp (`newest`, `price_asc`, `price_desc`, `rating`, `popular`), phân trang (`Page`, `PageSize`). (Public / Admin)
+  2. `GET /api/catalog/products/{id}`: Xem chi tiết đôi giày, bảng size tồn kho, album ảnh, đánh giá (hỗ trợ cờ `includeInactive=true`). (Public)
   3. `GET /api/catalog/filters`: Lấy metadata bộ lọc (dòng giày, màu sắc, size còn hàng, khoảng giá Min/Max). (Public)
   4. `POST /api/catalog/products/{id}/reviews`: Gửi đánh giá sao (1-5) & nhận xét, tự động tính lại `AverageRating` và `ReviewCount`. (Yêu cầu đăng nhập `Customer` hoặc `Admin`)
-  5. `POST /api/catalog/products`: Thêm mẫu giày mới vào cửa hàng. (Yêu cầu `Admin`)
-  6. `PUT /api/catalog/products/{id}`: Cập nhật thông tin, giá, bảng size tồn kho. (Yêu cầu `Admin`)
-  7. `DELETE /api/catalog/products/{id}`: Ẩn sản phẩm khỏi cửa hàng (Xóa mềm). (Yêu cầu `Admin`)
-  8. **Tự động Seeder:** Khởi tạo sẵn 6 mẫu giày Adidas thật (Ultraboost Light, Samba OG, Stan Smith, Predator Elite, Forum Low, Dropset 2) kèm ảnh thật, giá và review mẫu khi khởi động.
+  5. `POST /api/catalog/products`: Thêm mẫu giày mới vào cửa hàng (hỗ trợ cờ `IsActive = true` mặc định). (Yêu cầu `Admin`)
+  6. `PUT /api/catalog/products/{id}`: Cập nhật thông tin, giá, bảng size tồn kho, trạng thái `IsActive`. (Yêu cầu `Admin`)
+  7. `DELETE /api/catalog/products/{id}`: Xóa mẫu giày (Mặc định: Xóa mềm `isActive=false`. Truyền `hardDelete=true`: Xóa vĩnh viễn khỏi Database). (Yêu cầu `Admin`)
+  8. `PATCH /api/catalog/products/{id}/restore`: Khôi phục lại mẫu giày đã ẩn về trạng thái mở bán. (Yêu cầu `Admin`)
+  9. **Tự động Seeder:** Khởi tạo sẵn 6 mẫu giày Adidas thật (Ultraboost Light, Samba OG, Stan Smith, Predator Elite, Forum Low, Dropset 2) kèm ảnh thật, giá và review mẫu khi khởi động.
 
 ---
 
@@ -73,3 +74,19 @@ JwtSettings__Secret=Chuoi_Khoa_Bi_Mat_Cuc_Ky_Dai_It_Nhat_32_Ky_Tu_Random_123456!
 JwtSettings__Issuer=AuthService
 JwtSettings__Audience=AuthServiceUsers
 ```
+
+---
+
+## 4. NHẬT KÝ ĐIỀU CHỈNH GẦN NHẤT (CHANGELOG)
+### 🛠️ Bản cập nhật CatalogService (Vòng đời sản phẩm & Quản trị Admin):
+1. **Cấu hình Trạng thái hiển thị (`IsActive`):**
+   - Bổ sung `bool IsActive = true` mặc định vào `CreateProductRequest` giúp Admin chủ động bật/tắt khi tạo mới.
+   - Gán giá trị mặc định `bool IsActive = true` trong `UpdateProductRequest` để tránh lỗi Swagger UI tự sinh `false` gây ẩn nhầm sản phẩm.
+2. **Quản lý Xóa 2 cấp độ (Soft Delete vs Hard Delete):**
+   - **Xóa mềm (Mặc định):** `DELETE /api/catalog/products/{id}` chuyển `isActive = false` để giữ lại dữ liệu lịch sử đơn hàng. Xử lý chuẩn Idempotent (không bị 404 khi gọi lại).
+   - **Xóa cứng (Vĩnh viễn):** `DELETE /api/catalog/products/{id}?hardDelete=true` gọi `DeleteOneAsync` để xóa hoàn toàn bản ghi khỏi MongoDB khi Admin tạo nhầm hoặc dọn rác test.
+3. **Khôi phục sản phẩm (Restore):**
+   - Thêm `PATCH /api/catalog/products/{id}/restore` giúp Admin đưa sản phẩm bị ẩn quay lại mở bán.
+4. **Tra cứu sản phẩm bị ẩn:**
+   - Hỗ trợ xem chi tiết sản phẩm bị ẩn qua cờ `GET /api/catalog/products/{id}?includeInactive=true`.
+   - Bổ sung tham số `isActive` vào `ProductFilterQuery` để Admin lọc riêng danh sách sản phẩm đã ẩn trong kho.

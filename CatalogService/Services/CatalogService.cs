@@ -8,10 +8,11 @@ namespace CatalogService.Services;
 public interface ICatalogService
 {
     Task<PagedResult<ShoeProduct>> GetProductsAsync(ProductFilterQuery query);
-    Task<ShoeProduct?> GetProductByIdAsync(string id);
+    Task<ShoeProduct?> GetProductByIdAsync(string id, bool includeInactive = false);
     Task<ShoeProduct> CreateProductAsync(CreateProductRequest req);
     Task<ShoeProduct?> UpdateProductAsync(string id, UpdateProductRequest req);
-    Task<bool> DeleteProductAsync(string id);
+    Task<bool> DeleteProductAsync(string id, bool hardDelete = false);
+    Task<bool> RestoreProductAsync(string id);
     Task<ShoeProduct?> AddReviewAsync(string id, string userId, string fullName, AddReviewRequest req);
     Task<CatalogFiltersResponse> GetFiltersAsync();
 }
@@ -28,7 +29,11 @@ public class ProductCatalogService : ICatalogService
     public async Task<PagedResult<ShoeProduct>> GetProductsAsync(ProductFilterQuery query)
     {
         var filterBuilder = Builders<ShoeProduct>.Filter;
-        var filter = filterBuilder.Eq(p => p.IsActive, true);
+
+        // 0. Lọc trạng thái Active (Mặc định chỉ lấy sản phẩm đang kinh doanh)
+        var filter = query.IsActive.HasValue
+            ? filterBuilder.Eq(p => p.IsActive, query.IsActive.Value)
+            : filterBuilder.Eq(p => p.IsActive, true);
 
         // 1. Tìm kiếm theo từ khóa (Tên hoặc Màu hoặc Mô tả)
         if (!string.IsNullOrWhiteSpace(query.Keyword))
@@ -117,8 +122,12 @@ public class ProductCatalogService : ICatalogService
         return new PagedResult<ShoeProduct>(items, totalCount, page, pageSize, totalPages);
     }
 
-    public async Task<ShoeProduct?> GetProductByIdAsync(string id)
+    public async Task<ShoeProduct?> GetProductByIdAsync(string id, bool includeInactive = false)
     {
+        if (includeInactive)
+        {
+            return await _products.Find(p => p.Id == id).FirstOrDefaultAsync();
+        }
         return await _products.Find(p => p.Id == id && p.IsActive).FirstOrDefaultAsync();
     }
 
@@ -138,7 +147,7 @@ public class ProductCatalogService : ICatalogService
             ImageUrls = req.ImageUrls ?? new(),
             Tags = req.Tags ?? new(),
             CreatedAt = DateTime.UtcNow,
-            IsActive = true
+            IsActive = req.IsActive
         };
 
         await _products.InsertOneAsync(product);
@@ -168,13 +177,50 @@ public class ProductCatalogService : ICatalogService
             new FindOneAndUpdateOptions<ShoeProduct> { ReturnDocument = ReturnDocument.After });
     }
 
-    public async Task<bool> DeleteProductAsync(string id)
+    public async Task<bool> DeleteProductAsync(string id, bool hardDelete = false)
     {
-        // Xóa mềm: đánh dấu IsActive = false
+        // Kiểm tra xem sản phẩm có tồn tại trong DB không
+        var product = await _products.Find(p => p.Id == id).FirstOrDefaultAsync();
+        if (product == null)
+            return false;
+
+        if (hardDelete)
+        {
+            // Xóa cứng: xóa vĩnh viễn khỏi MongoDB Database
+            var deleteResult = await _products.DeleteOneAsync(p => p.Id == id);
+            return deleteResult.DeletedCount > 0;
+        }
+
+        // Nếu đã bị xóa mềm trước đó rồi, coi như thành công (idempotent)
+        if (!product.IsActive)
+            return true;
+
+        // Đánh dấu IsActive = false và cập nhật thời gian
         var result = await _products.UpdateOneAsync(
             p => p.Id == id,
-            Builders<ShoeProduct>.Update.Set(p => p.IsActive, false));
-        return result.ModifiedCount > 0;
+            Builders<ShoeProduct>.Update
+                .Set(p => p.IsActive, false)
+                .Set(p => p.UpdatedAt, DateTime.UtcNow));
+
+        return result.MatchedCount > 0;
+    }
+
+    public async Task<bool> RestoreProductAsync(string id)
+    {
+        var product = await _products.Find(p => p.Id == id).FirstOrDefaultAsync();
+        if (product == null)
+            return false;
+
+        if (product.IsActive)
+            return true; // Đã active sẵn rồi
+
+        var result = await _products.UpdateOneAsync(
+            p => p.Id == id,
+            Builders<ShoeProduct>.Update
+                .Set(p => p.IsActive, true)
+                .Set(p => p.UpdatedAt, DateTime.UtcNow));
+
+        return result.MatchedCount > 0;
     }
 
     public async Task<ShoeProduct?> AddReviewAsync(string id, string userId, string fullName, AddReviewRequest req)

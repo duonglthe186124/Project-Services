@@ -31,12 +31,12 @@ public class CatalogController : ControllerBase
     }
 
     /// <summary>
-    /// Xem chi tiết 1 mẫu giày Adidas (Công khai)
+    /// Xem chi tiết 1 mẫu giày Adidas (Công khai, hỗ trợ Admin xem sản phẩm bị ẩn qua includeInactive=true)
     /// </summary>
     [HttpGet("products/{id}")]
-    public async Task<IActionResult> GetProductById(string id)
+    public async Task<IActionResult> GetProductById(string id, [FromQuery] bool includeInactive = false)
     {
-        var product = await _catalogService.GetProductByIdAsync(id);
+        var product = await _catalogService.GetProductByIdAsync(id, includeInactive);
         if (product == null)
             return NotFound(new { message = "Không tìm thấy sản phẩm hoặc sản phẩm đã ngừng kinh doanh." });
 
@@ -105,16 +105,34 @@ public class CatalogController : ControllerBase
     }
 
     /// <summary>
-    /// Xóa mẫu giày khỏi cửa hàng (Xóa mềm - Chỉ dành cho Admin)
+    /// Xóa mẫu giày khỏi cửa hàng (Mặc định: Xóa mềm - ẩn sản phẩm. Truyền hardDelete=true để xóa vĩnh viễn khỏi Database - Chỉ dành cho Admin)
     /// </summary>
     [Authorize(Roles = "Admin")]
     [HttpDelete("products/{id}")]
-    public async Task<IActionResult> DeleteProduct(string id)
+    public async Task<IActionResult> DeleteProduct(string id, [FromQuery] bool hardDelete = false)
     {
-        var success = await _catalogService.DeleteProductAsync(id);
+        var success = await _catalogService.DeleteProductAsync(id, hardDelete);
         if (!success)
             return NotFound(new { message = "Không tìm thấy sản phẩm để xóa." });
 
-        return Ok(new { message = "Đã ẩn sản phẩm khỏi cửa hàng thành công." });
+        var msg = hardDelete
+            ? "Đã xóa vĩnh viễn sản phẩm khỏi cơ sở dữ liệu thành công."
+            : "Đã ẩn sản phẩm khỏi cửa hàng thành công.";
+
+        return Ok(new { message = msg, hardDeleted = hardDelete });
+    }
+
+    /// <summary>
+    /// Khôi phục mẫu giày đã bị ẩn/xóa mềm về lại cửa hàng (Chỉ dành cho Admin)
+    /// </summary>
+    [Authorize(Roles = "Admin")]
+    [HttpPatch("products/{id}/restore")]
+    public async Task<IActionResult> RestoreProduct(string id)
+    {
+        var success = await _catalogService.RestoreProductAsync(id);
+        if (!success)
+            return NotFound(new { message = "Không tìm thấy sản phẩm để khôi phục." });
+
+        return Ok(new { message = "Đã khôi phục sản phẩm mở bán trở lại thành công." });
     }
 }
