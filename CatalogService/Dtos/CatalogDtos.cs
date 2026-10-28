@@ -120,3 +120,60 @@ public record CatalogFiltersResponse(
     List<int> AvailableSizes,
     List<string> Tags,
     PriceRangeDto PriceRange);
+
+// ===================== SAGA / INTERNAL STOCK RESERVATION DTOs =====================
+
+public record ReserveStockItemRequest(
+    [Required(ErrorMessage = "ProductId là bắt buộc.")]
+    string ProductId,
+
+    [Range(30, 55, ErrorMessage = "Size giày phải từ 30 đến 55.")]
+    int Size,
+
+    [Range(1, 100, ErrorMessage = "Số lượng đặt giữ cho mỗi size phải từ 1 đến 100.")]
+    int Quantity);
+
+public record ReserveStockRequest(
+    [Required(ErrorMessage = "OrderId là bắt buộc để đảm bảo tính Lũy đẳng (Idempotency).")]
+    string OrderId,
+
+    string? OrderCode,
+
+    string? UserId,
+
+    [Required(ErrorMessage = "Danh sách sản phẩm cần khóa kho không được để trống.")]
+    [MinLength(1, ErrorMessage = "Đơn hàng phải có ít nhất 1 sản phẩm.")]
+    List<ReserveStockItemRequest> Items,
+
+    [Range(1, 1440, ErrorMessage = "Thời gian giữ hàng (HoldMinutes) phải từ 1 đến 1440 phút.")]
+    int HoldMinutes = 15);
+
+public record ConfirmStockRequest(
+    [Required(ErrorMessage = "OrderId là bắt buộc.")]
+    string OrderId,
+
+    string? Reason = "PaymentVerified");
+
+public record ReleaseStockRequest(
+    [Required(ErrorMessage = "OrderId là bắt buộc.")]
+    string OrderId,
+
+    string Reason = "OrderCancelledOrExpired");
+
+public record StockFailureDetail(
+    string ProductId,
+    string? ProductName,
+    int Size,
+    int RequestedQuantity,
+    int AvailableQuantity,
+    string FailureCode,
+    string Reason);
+
+public record StockOperationResult(
+    bool Success,
+    string Status,
+    string Message,
+    bool IsIdempotentReplay,
+    StockReservation? Reservation = null,
+    List<StockFailureDetail>? FailedItems = null);
+

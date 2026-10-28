@@ -1,0 +1,731 @@
+### ==============================================================================
+### MASTER HTTP ACCEPTANCE TEST SUITE: OrderService & In-Process Saga Workflow
+### Target Service: OrderService (Port 5267:8080, DB: OrderDb)
+### Integrated Services: AuthService (Port 5265), CatalogService (Port 5000/5266)
+### Coverage: All 23 Features (F-01 -> F-23) & Acceptance Criteria (AC 2.a -> AC 2.k)
+### ==============================================================================
+
+@AuthService_Host = http://localhost:5265
+@CatalogService_Host = http://localhost:5000
+@OrderService_Host = http://localhost:5267
+# Trùng với InternalApi:Key của OrderService (để trống ở dev thì header này bị bỏ qua)
+@internalApiKey = 
+
+### ------------------------------------------------------------------------------
+### SECTION 0: AUTHENTICATION & PERSONA TOKEN ACQUISITION (RBAC SETUP)
+### ------------------------------------------------------------------------------
+
+### 0.1 Provision Admin Persona via AuthService
+# @name provisionAdmin
+POST {{AuthService_Host}}/api/auth/users/provision-staff
+Content-Type: application/json
+
+{
+  "email": "admin_e2e@example.com",
+  "password": "Admin@123456!",
+  "fullName": "System Admin E2E",
+  "role": "Admin"
+}
+
+### Store Admin Token
+@adminToken = {{provisionAdmin.response.body.auth.accessToken}}
+
+### 0.2 Provision LogisticsStaff Persona via AuthService
+# @name provisionStaff
+POST {{AuthService_Host}}/api/auth/users/provision-staff
+Content-Type: application/json
+
+{
+  "email": "staff_e2e@example.com",
+  "password": "Staff@123456!",
+  "fullName": "Logistics Staff E2E",
+  "role": "LogisticsStaff"
+}
+
+### Store Logistics Staff Token
+@staffToken = {{provisionStaff.response.body.auth.accessToken}}
+
+### 0.3 Provision Customer A Persona via AuthService
+# @name provisionCustomerA
+POST {{AuthService_Host}}/api/auth/users/provision-staff
+Content-Type: application/json
+
+{
+  "email": "customer_a@example.com",
+  "password": "Customer@123456!",
+  "fullName": "Customer A E2E",
+  "role": "Customer"
+}
+
+### Store Customer A Token & ID
+@customerAToken = {{provisionCustomerA.response.body.auth.accessToken}}
+@customerAUserId = {{provisionCustomerA.response.body.auth.userId}}
+
+### 0.4 Provision Customer B Persona via AuthService (for Tenant Isolation Tests)
+# @name provisionCustomerB
+POST {{AuthService_Host}}/api/auth/users/provision-staff
+Content-Type: application/json
+
+{
+  "email": "customer_b@example.com",
+  "password": "Customer@123456!",
+  "fullName": "Customer B E2E",
+  "role": "Customer"
+}
+
+### Store Customer B Token & ID
+@customerBToken = {{provisionCustomerB.response.body.auth.accessToken}}
+@customerBUserId = {{provisionCustomerB.response.body.auth.userId}}
+
+
+### ------------------------------------------------------------------------------
+### SECTION 1: CATALOG SERVICE DISCOVERY & SEED VERIFICATION
+### ------------------------------------------------------------------------------
+
+### 1.1 Discover Active Catalog Products (Ultraboost, Samba, Stan Smith)
+# @name getCatalogProducts
+GET {{CatalogService_Host}}/api/catalog/products?page=1&pageSize=10
+Accept: application/json
+
+### Note Product IDs from Catalog Response:
+# Sample Product ID 1 (Ultraboost Light): 6ad318f7691a1e702d881190 (Size: 40, 41, 42 - Price: 3,800,000 VND)
+# Sample Product ID 2 (Samba OG):         6ad318f7691a1e702d881191 (Size: 40, 41, 42 - Price: 2,700,000 VND)
+@productId1 = 6ad318f7691a1e702d881190
+@productId2 = 6ad318f7691a1e702d881191
+
+
+### ------------------------------------------------------------------------------
+### SECTION 2: SHOPPING CART DOMAIN OPERATIONS (F-01 to F-05)
+### ------------------------------------------------------------------------------
+
+### 2.1 Fetch Empty Cart for Customer A (F-01)
+# Expect: 200 OK, items: [], totalItems: 0, subTotal: 0
+GET {{OrderService_Host}}/api/carts/my-cart
+Authorization: Bearer {{customerAToken}}
+Accept: application/json
+
+### 2.2 Add Item 1 (Size 42, Qty 1) to Customer A's Cart (F-02)
+# Expect: 200 OK or 201 Created
+POST {{OrderService_Host}}/api/carts/items
+Authorization: Bearer {{customerAToken}}
+Content-Type: application/json
+
+{
+  "productId": "{{productId1}}",
+  "productName": "Adidas Ultraboost Light Unisex",
+  "size": 42,
+  "quantity": 1,
+  "unitPrice": 3800000,
+  "thumbnailUrl": "https://assets.adidas.com/sample.jpg"
+}
+
+### 2.3 Increment Quantity by Adding Same Product & Size (Qty 2) (F-02)
+# Expect: 200 OK, item quantity becomes 3
+POST {{OrderService_Host}}/api/carts/items
+Authorization: Bearer {{customerAToken}}
+Content-Type: application/json
+
+{
+  "productId": "{{productId1}}",
+  "productName": "Adidas Ultraboost Light Unisex",
+  "size": 42,
+  "quantity": 2,
+  "unitPrice": 3800000,
+  "thumbnailUrl": "https://assets.adidas.com/sample.jpg"
+}
+
+### 2.4 Update Item Quantity Directly to 1 (F-03)
+# Expect: 200 OK, item quantity updated to 1
+PUT {{OrderService_Host}}/api/carts/items/{{productId1}}/42
+Authorization: Bearer {{customerAToken}}
+Content-Type: application/json
+
+{
+  "quantity": 1
+}
+
+### 2.5 Add Second Item (ProductId2, Size 40, Qty 1) (F-02)
+# Expect: 200 OK, cart now has 2 distinct line items
+POST {{OrderService_Host}}/api/carts/items
+Authorization: Bearer {{customerAToken}}
+Content-Type: application/json
+
+{
+  "productId": "{{productId2}}",
+  "productName": "Adidas Samba OG Classic",
+  "size": 40,
+  "quantity": 1,
+  "unitPrice": 2700000,
+  "thumbnailUrl": "https://assets.adidas.com/samba.jpg"
+}
+
+### 2.6 Remove Item 2 from Cart (F-04)
+# Expect: 200 OK, Item 2 removed; Item 1 remains
+DELETE {{OrderService_Host}}/api/carts/items/{{productId2}}/40
+Authorization: Bearer {{customerAToken}}
+
+### 2.7 Clear Cart Completely (F-05)
+# Expect: 200 OK, cart emptied
+DELETE {{OrderService_Host}}/api/carts/clear
+Authorization: Bearer {{customerAToken}}
+
+### 2.8 Verify Cart is Empty
+# Expect: 200 OK, items: []
+GET {{OrderService_Host}}/api/carts/my-cart
+Authorization: Bearer {{customerAToken}}
+
+
+### ------------------------------------------------------------------------------
+### SECTION 3: ACCEPTANCE CRITERIA VERIFICATION (AC 2.a THROUGH AC 2.k)
+### ------------------------------------------------------------------------------
+
+### ==============================================================================
+### AC 2.a: Valid Checkout with Zero-Trust Pricing Snapshot
+### - Client passes fake low price (unitPrice: 1000 VND).
+### - Server discards fake price; takes authoritative snapshot from Catalog (3,800,000 VND).
+### - Stock reservation created in Catalog with 15m TTL.
+### - Order status: AwaitingPayment.
+### ==============================================================================
+
+# @name checkoutAc2a
+POST {{OrderService_Host}}/api/orders/checkout
+Authorization: Bearer {{customerAToken}}
+X-Idempotency-Key: AC2A-CHECKOUT-001-{{$guid}}
+Content-Type: application/json
+
+{
+  "customerName": "Nguyen Van A",
+  "customerPhone": "0912345678",
+  "shippingAddress": {
+    "addressLine": "123 Le Loi Street",
+    "ward": "Ben Nghe Ward",
+    "district": "District 1",
+    "city": "Ho Chi Minh City"
+  },
+  "paymentMethod": "COD",
+  "items": [
+    {
+      "productId": "{{productId1}}",
+      "size": 42,
+      "quantity": 1,
+      "unitPrice": 1000
+    }
+  ]
+}
+
+### Extract Order ID from AC 2.a
+@orderIdAc2a = {{checkoutAc2a.response.body.id}}
+
+### Inspect Order Details to Verify Zero-Trust Price Snapshot
+# Expect: unitPrice = 3800000, subTotal = 3800000 (fake 1000 VND completely ignored!)
+# Expect: orderStatus = "AwaitingPayment"
+GET {{OrderService_Host}}/api/orders/{{orderIdAc2a}}
+Authorization: Bearer {{customerAToken}}
+
+### Inspect Catalog Stock Reservation for Order AC 2.a
+# Expect: status = "Reserved", holdMinutes = 15
+GET {{CatalogService_Host}}/api/catalog/internal/stock/reservations/{{orderIdAc2a}}
+
+
+### ==============================================================================
+### AC 2.b: Checkout Exceeding Catalog Stock -> HTTP 409 Conflict
+### - Requested quantity (999) exceeds available inventory.
+### - Catalog returns 409 OutOfStock.
+### - OrderService propagates 409 Conflict; zero order document created in OrderDb.
+### ==============================================================================
+
+POST {{OrderService_Host}}/api/orders/checkout
+Authorization: Bearer {{customerAToken}}
+X-Idempotency-Key: AC2B-OVERSTOCK-001-{{$guid}}
+Content-Type: application/json
+
+{
+  "customerName": "Nguyen Van A",
+  "customerPhone": "0912345678",
+  "shippingAddress": {
+    "addressLine": "123 Le Loi Street",
+    "ward": "Ben Nghe Ward",
+    "district": "District 1",
+    "city": "Ho Chi Minh City"
+  },
+  "paymentMethod": "Online_QR",
+  "items": [
+    {
+      "productId": "{{productId1}}",
+      "size": 42,
+      "quantity": 999,
+      "unitPrice": 3800000
+    }
+  ]
+}
+# Expect: HTTP 409 Conflict
+# Response body contains: status: "OutOfStock", failedItems list
+
+
+### ==============================================================================
+### AC 2.c: Idempotency Key Replay -> Exactly-Once Order & Reservation
+### - Resending identical request with same X-Idempotency-Key returns cached response.
+### - No second order document created in Orders collection.
+### - Catalog reservation is NOT duplicated.
+### ==============================================================================
+
+@idempotencyKeyAc2c = AC2C-IDEMP-KEY-9999
+
+### First Request: Create Order with Unique Idempotency Key
+# @name checkoutFirstAttempt
+POST {{OrderService_Host}}/api/orders/checkout
+Authorization: Bearer {{customerBToken}}
+X-Idempotency-Key: {{idempotencyKeyAc2c}}
+Content-Type: application/json
+
+{
+  "customerName": "Tran Thi B",
+  "customerPhone": "0987654321",
+  "shippingAddress": {
+    "addressLine": "456 Tran Hung Dao",
+    "ward": "Ward 5",
+    "district": "District 5",
+    "city": "Ho Chi Minh City"
+  },
+  "paymentMethod": "COD",
+  "items": [
+    {
+      "productId": "{{productId2}}",
+      "size": 40,
+      "quantity": 1,
+      "unitPrice": 2700000
+    }
+  ]
+}
+# Expect: HTTP 201 Created
+
+### Extract Order ID from First Attempt
+@firstOrderId = {{checkoutFirstAttempt.response.body.id}}
+
+### Second Request: Immediate Replay with Identical Idempotency Key
+# @name checkoutReplayAttempt
+POST {{OrderService_Host}}/api/orders/checkout
+Authorization: Bearer {{customerBToken}}
+X-Idempotency-Key: {{idempotencyKeyAc2c}}
+Content-Type: application/json
+
+{
+  "customerName": "Tran Thi B",
+  "customerPhone": "0987654321",
+  "shippingAddress": {
+    "addressLine": "456 Tran Hung Dao",
+    "ward": "Ward 5",
+    "district": "District 5",
+    "city": "Ho Chi Minh City"
+  },
+  "paymentMethod": "COD",
+  "items": [
+    {
+      "productId": "{{productId2}}",
+      "size": 40,
+      "quantity": 1,
+      "unitPrice": 2700000
+    }
+  ]
+}
+# Expect: HTTP 201 Created (Cached Replay)
+# Response body matches firstOrderId exactly!
+
+
+### ==============================================================================
+### AC 2.d: High-Value Policy (>= 5,000,000 VND)
+### - Choosing COD triggers HTTP 400 Bad Request.
+### - Choosing Online succeeds with DeliveryOtpCode (6 digits) & SecuritySealCode (SEAL-xxxxxx).
+### ==============================================================================
+
+### 1. High-Value with COD -> Expect 400 Bad Request
+POST {{OrderService_Host}}/api/orders/checkout
+Authorization: Bearer {{customerAToken}}
+X-Idempotency-Key: AC2D-HIGHVAL-COD-{{$guid}}
+Content-Type: application/json
+
+{
+  "customerName": "Nguyen Van A",
+  "customerPhone": "0912345678",
+  "shippingAddress": {
+    "addressLine": "123 Le Loi Street",
+    "ward": "Ben Nghe Ward",
+    "district": "District 1",
+    "city": "Ho Chi Minh City"
+  },
+  "paymentMethod": "COD",
+  "items": [
+    {
+      "productId": "{{productId1}}",
+      "size": 42,
+      "quantity": 2,
+      "unitPrice": 3800000
+    }
+  ]
+}
+# Expect: HTTP 400 Bad Request ("Đơn hàng từ 5.000.000 VNĐ bắt buộc thanh toán Online 100%")
+
+### 2. High-Value with Online Payment -> Expect 201 Created with OTP & Security Seal
+# @name checkoutHighValueOnline
+POST {{OrderService_Host}}/api/orders/checkout
+Authorization: Bearer {{customerAToken}}
+X-Idempotency-Key: AC2D-HIGHVAL-ONLINE-{{$guid}}
+Content-Type: application/json
+
+{
+  "customerName": "Nguyen Van A",
+  "customerPhone": "0912345678",
+  "shippingAddress": {
+    "addressLine": "123 Le Loi Street",
+    "ward": "Ben Nghe Ward",
+    "district": "District 1",
+    "city": "Ho Chi Minh City"
+  },
+  "paymentMethod": "Online_QR",
+  "items": [
+    {
+      "productId": "{{productId1}}",
+      "size": 42,
+      "quantity": 2,
+      "unitPrice": 3800000
+    }
+  ]
+}
+# Expect: HTTP 201 Created
+# Assertions:
+# - isHighValue == true
+# - deliveryOtpCode matches /^\d{6}$/
+# - securitySealCode matches /^SEAL-[A-Z0-9]{6}$/
+
+
+### ==============================================================================
+### AC 2.e: Anti-Hoarding Guard (Chống găm hàng)
+### - Maximum 2 active AwaitingPayment orders per user.
+### - Attempting a 3rd order triggers HTTP 429 Too Many Requests.
+### ==============================================================================
+
+# Note: Customer A currently has 2 active AwaitingPayment orders (from AC 2.a and AC 2.d).
+# Attempting a 3rd checkout must be rejected immediately!
+
+POST {{OrderService_Host}}/api/orders/checkout
+Authorization: Bearer {{customerAToken}}
+X-Idempotency-Key: AC2E-HOARDING-3RD-{{$guid}}
+Content-Type: application/json
+
+{
+  "customerName": "Nguyen Van A",
+  "customerPhone": "0912345678",
+  "shippingAddress": {
+    "addressLine": "123 Le Loi Street",
+    "ward": "Ben Nghe Ward",
+    "district": "District 1",
+    "city": "Ho Chi Minh City"
+  },
+  "paymentMethod": "Online_QR",
+  "items": [
+    {
+      "productId": "{{productId2}}",
+      "size": 40,
+      "quantity": 1,
+      "unitPrice": 2700000
+    }
+  ]
+}
+# Expect: HTTP 429 Too Many Requests
+# Response contains: activeAwaitingOrdersCount = 2
+
+
+### ==============================================================================
+### AC 2.f: Order Cancellation -> Catalog Stock Released & Timeline Updated
+### - Customer cancels own AwaitingPayment order.
+### - Order status becomes "Cancelled".
+### - Catalog reservation moves to "Released".
+### - AuditTrail logs cancellation event with actor and timestamp.
+### ==============================================================================
+
+### Cancel Customer A's First Order (orderIdAc2a)
+POST {{OrderService_Host}}/api/orders/{{orderIdAc2a}}/cancel
+Authorization: Bearer {{customerAToken}}
+Content-Type: application/json
+
+{
+  "reason": "Khách hàng đổi ý muốn chọn size khác"
+}
+# Expect: HTTP 200 OK, orderStatus: "Cancelled"
+
+### Verify Catalog Reservation is Released (Stock Restored)
+# Expect: status = "Released", releaseReason = "OrderCancelledByUser"
+GET {{CatalogService_Host}}/api/catalog/internal/stock/reservations/{{orderIdAc2a}}
+
+### Inspect AuditTrail Timeline for Order AC 2.a
+# Expect: 200 OK, timeline has entry with fromState: "AwaitingPayment", toState: "Cancelled"
+GET {{OrderService_Host}}/api/orders/{{orderIdAc2a}}/timeline
+Authorization: Bearer {{customerAToken}}
+
+
+### ==============================================================================
+### AC 2.g: Order Expiration & Safe Late Payment Rejection
+### - Order in AwaitingPayment exceeds 15-minute TTL.
+### - Worker transitions order to Expired and releases Catalog stock.
+### - Late payment callback arriving after Expired is safely rejected (Stock NOT confirmed).
+### ==============================================================================
+
+### Create Order for Expiration Scenario
+# @name checkoutForExpiry
+POST {{OrderService_Host}}/api/orders/checkout
+Authorization: Bearer {{customerBToken}}
+X-Idempotency-Key: AC2G-EXPIRY-ORDER-{{$guid}}
+Content-Type: application/json
+
+{
+  "customerName": "Tran Thi B",
+  "customerPhone": "0987654321",
+  "shippingAddress": {
+    "addressLine": "456 Tran Hung Dao",
+    "ward": "Ward 5",
+    "district": "District 5",
+    "city": "Ho Chi Minh City"
+  },
+  "paymentMethod": "Online_Card",
+  "items": [
+    {
+      "productId": "{{productId2}}",
+      "size": 40,
+      "quantity": 1,
+      "unitPrice": 2700000
+    }
+  ]
+}
+
+@orderIdForExpiry = {{checkoutForExpiry.response.body.id}}
+
+### Simulate/Wait for Saga Timeout Sweep (or trigger cleanup)
+# In production, OrderSagaTimeoutWorker sweeps every 15-30s when ExpiresAt < UtcNow.
+# Once expired, order moves to "Expired" and Catalog releases stock.
+
+### Send Late Payment Callback for Expired/Cancelled Order
+POST {{OrderService_Host}}/api/orders/internal/payment-callback
+X-Internal-Api-Key: {{internalApiKey}}
+Content-Type: application/json
+
+{
+  "orderId": "{{orderIdAc2a}}",
+  "paymentTransactionId": "TXN-LATE-9999",
+  "amount": 3800000,
+  "paymentMethod": "Online_QR",
+  "callbackTimestamp": "2026-10-19T08:00:00Z"
+}
+# Expect: Safe Rejection (HTTP 400 Bad Request or 200 with status "LatePaymentDetected" / Auto-Refund flagged)
+# Crucial Invariant: Catalog stock MUST NOT be confirmed!
+
+### Verify Catalog Reservation is Still Released (NOT Confirmed)
+GET {{CatalogService_Host}}/api/catalog/internal/stock/reservations/{{orderIdAc2a}}
+# Expect: status remains "Released", NOT "Confirmed"
+
+
+### ==============================================================================
+### AC 2.h: Valid Payment Callback -> PaymentVerified & Catalog Confirmed
+### - Payment callback received on-time while order is AwaitingPayment.
+### - Order transitions to PaymentVerified -> ReadyForDispatch.
+### - Catalog reservation is Confirmed (permanent stock deduction).
+### ==============================================================================
+
+### Send Valid On-Time Payment Callback for Order AC 2.c
+POST {{OrderService_Host}}/api/orders/internal/payment-callback
+X-Internal-Api-Key: {{internalApiKey}}
+Content-Type: application/json
+
+{
+  "orderId": "{{firstOrderId}}",
+  "paymentTransactionId": "TXN-SUCCESS-1001",
+  "amount": 2700000,
+  "paymentMethod": "Online_Card",
+  "callbackTimestamp": "2026-10-19T07:45:00Z"
+}
+# Expect: HTTP 200 OK, order transitions to PaymentVerified / ReadyForDispatch
+
+### Verify Order Status Updated
+GET {{OrderService_Host}}/api/orders/{{firstOrderId}}
+Authorization: Bearer {{customerBToken}}
+# Expect: orderStatus = "PaymentVerified" or "ReadyForDispatch"
+
+### Verify Catalog Reservation Confirmed
+GET {{CatalogService_Host}}/api/catalog/internal/stock/reservations/{{firstOrderId}}
+# Expect: status = "Confirmed", confirmedAt is NOT null
+
+
+### ==============================================================================
+### AC 2.i: VipBulk Policy & Manual Approval
+### - Total >= 15,000,000 VND OR Quantity >= 4 pairs.
+### - Flag RequiresManualApproval = true.
+### - Customer attempt to approve -> HTTP 403 Forbidden.
+### - Admin / LogisticsStaff approve -> HTTP 200 OK, AuditTrail updated.
+### ==============================================================================
+
+### Create VipBulk Order (4 Pairs of Ultraboost = 15,200,000 VND)
+# @name checkoutVipBulk
+POST {{OrderService_Host}}/api/orders/checkout
+Authorization: Bearer {{customerAToken}}
+X-Idempotency-Key: AC2I-VIPBULK-{{$guid}}
+Content-Type: application/json
+
+{
+  "customerName": "Nguyen Van A VIP",
+  "customerPhone": "0912345678",
+  "shippingAddress": {
+    "addressLine": "123 Le Loi Street",
+    "ward": "Ben Nghe Ward",
+    "district": "District 1",
+    "city": "Ho Chi Minh City"
+  },
+  "paymentMethod": "Online_QR",
+  "items": [
+    {
+      "productId": "{{productId1}}",
+      "size": 42,
+      "quantity": 4,
+      "unitPrice": 3800000
+    }
+  ]
+}
+# Expect: HTTP 201 Created
+# Assertions:
+# - isHighValue == true
+# - isVipBulk == true
+# - requiresManualApproval == true
+# - isManuallyApproved == false
+
+@vipBulkOrderId = {{checkoutVipBulk.response.body.id}}
+
+### Customer Attempts to Approve Own VipBulk Order -> Expect 403 Forbidden
+POST {{OrderService_Host}}/api/orders/{{vipBulkOrderId}}/approve
+Authorization: Bearer {{customerAToken}}
+Content-Type: application/json
+
+{
+  "notes": "Customer tự duyệt đơn của mình"
+}
+# Expect: HTTP 403 Forbidden
+
+### Admin Approves VipBulk Order -> Expect 200 OK
+POST {{OrderService_Host}}/api/orders/{{vipBulkOrderId}}/approve
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "notes": "Admin verified customer KYC & high-value profile"
+}
+# Expect: HTTP 200 OK, isManuallyApproved: true, approvedBy: Admin
+
+### Inspect Timeline to Verify Approval Entry
+GET {{OrderService_Host}}/api/orders/{{vipBulkOrderId}}/timeline
+Authorization: Bearer {{customerAToken}}
+# Expect: Timeline contains "VipBulkApproved" trigger action by Admin
+
+
+### ==============================================================================
+### AC 2.j: Strict RBAC Enforcement
+### - Anonymous call -> 401 Unauthorized.
+### - Customer calling Admin-only API (GET /api/orders) -> 403 Forbidden.
+### - Customer A attempting to view Customer B's order -> 403 Forbidden / 404 Not Found.
+### ==============================================================================
+
+### 1. Anonymous Call to Protected API -> Expect 401 Unauthorized
+GET {{OrderService_Host}}/api/orders/my-orders
+# Expect: HTTP 401 Unauthorized
+
+### 2. Customer Calling Admin/Staff Global Orders API -> Expect 403 Forbidden
+GET {{OrderService_Host}}/api/orders
+Authorization: Bearer {{customerAToken}}
+# Expect: HTTP 403 Forbidden
+
+### 3. Admin / Staff Calling Global Orders API -> Expect 200 OK
+GET {{OrderService_Host}}/api/orders
+Authorization: Bearer {{staffToken}}
+# Expect: HTTP 200 OK with paginated list of all system orders
+
+### 4. Tenant Isolation: Customer A Attempts to View Customer B's Order
+GET {{OrderService_Host}}/api/orders/{{firstOrderId}}
+Authorization: Bearer {{customerAToken}}
+# Expect: HTTP 403 Forbidden (or 404 Not Found)
+
+
+### ==============================================================================
+### AC 2.k: Resilient Outbox Compensations (OrderCompensations)
+### - Customer cancels order while CatalogService is unreachable.
+### - Compensation record is enqueued in OrderCompensations collection.
+### - Inspection API displays pending compensations.
+### - Compensation worker retry executes release and marks Succeeded.
+### ==============================================================================
+
+### Inspect Pending Outbox Compensations
+GET {{OrderService_Host}}/api/orders/internal/compensations
+# Expect: HTTP 200 OK with list of pending/processed compensations
+
+### Trigger Immediate Sweep of Order Compensations (Dev/QA Fast Sweep)
+POST {{OrderService_Host}}/api/orders/internal/compensations/trigger
+# Expect: HTTP 200 OK with count of compensations processed
+
+
+### ------------------------------------------------------------------------------
+### SECTION 4: CONCURRENCY & OCC RACE CONDITION VERIFICATION (AC 3)
+### ------------------------------------------------------------------------------
+
+### OCC Verification Notes:
+# Two simultaneous transitions executed on the exact same OrderId and Version:
+# 1. Thread A: POST /api/orders/{id}/cancel
+# 2. Thread B: POST /api/orders/internal/payment-callback
+# Both filter on: { OrderId: id, Version: 1, CurrentState: "AwaitingPayment" }
+# MongoDB FindOneAndUpdateAsync guarantees atomic execution:
+# Exactly ONE transition succeeds and increments Version from 1 to 2.
+# The second transition matches 0 documents and returns 409 Conflict / safe abort.
+
+
+### ------------------------------------------------------------------------------
+### SECTION M4: CHECKOUT + PAYMENT CALLBACK (COD / Online_QR) -> WAYBILL + EMAIL
+### ------------------------------------------------------------------------------
+
+### M4.1 Checkout từ giỏ hàng (thêm hàng vào giỏ trước bằng POST /api/carts/items). Email lấy từ JWT, tên từ claim fullName.
+# @name checkout
+POST {{OrderService_Host}}/api/orders/checkout
+Authorization: Bearer {{customerAToken}}
+Content-Type: application/json
+
+{
+  "customerPhone": "0912345678",
+  "shippingAddress": {
+    "addressLine": "12 Nguyen Hue",
+    "ward": "Ben Nghe",
+    "district": "Quan 1",
+    "city": "TP HCM"
+  }
+}
+
+### M4.2 Checkout mua ngay (bỏ qua giỏ) + ghi đè email/tên người nhận
+POST {{OrderService_Host}}/api/orders/checkout
+Authorization: Bearer {{customerAToken}}
+Content-Type: application/json
+
+{
+  "customerName": "Nguyen Van A",
+  "customerPhone": "+84912345678",
+  "customerEmail": "nhan_hang@example.com",
+  "shippingAddress": { "addressLine": "12 Nguyen Hue", "ward": "Ben Nghe", "district": "Quan 1", "city": "TP HCM" },
+  "items": [ { "productId": "REPLACE_WITH_PRODUCT_OBJECT_ID", "size": 42, "quantity": 1 } ]
+}
+
+### M4.3 Giả lập PaymentService báo COD (hoặc đổi paymentMethod thành Online_QR) -> ReadyForDispatch + sinh WaybillCode + gửi email
+POST {{OrderService_Host}}/api/orders/internal/payment-callback
+X-Internal-Api-Key: {{internalApiKey}}
+Content-Type: application/json
+
+{
+  "orderId": "{{checkout.response.body.orderId}}",
+  "paymentTransactionId": "COD-TEST-0001",
+  "amount": {{checkout.response.body.totalAmount}},
+  "paymentMethod": "COD"
+}
+
+### M4.4 Xem chi tiết đơn: có customerEmail + waybillCode sau khi callback thành công
+GET {{OrderService_Host}}/api/orders/{{checkout.response.body.orderId}}
+Authorization: Bearer {{customerAToken}}

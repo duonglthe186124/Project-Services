@@ -14,6 +14,7 @@ builder.Configuration.AddJsonFile("appsettings.Development.json", optional: true
 
 // 1. Dependency Injection
 builder.Services.AddScoped<ICatalogService, ProductCatalogService>();
+builder.Services.AddHostedService<StockReservationExpirationWorker>();
 
 // 2. CORS (Cho phép kết nối tự do khi dev)
 builder.Services.AddCors(options =>
@@ -59,7 +60,7 @@ builder.Services.AddSwaggerGen(c =>
     {
         Title = "Adidas Shoe Catalog Service API",
         Version = "v1",
-        Description = "Microservice trưng bày và tra cứu danh mục giày thể thao / Unisex Adidas."
+        Description = "Microservice trưng bày, tra cứu danh mục giày thể thao Adidas và điều phối khóa tồn kho nguyên tử (Atomic Stock Reservation)."
     });
 
     c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
@@ -108,14 +109,28 @@ var app = builder.Build();
 try
 {
     var db = app.Services.GetRequiredService<IMongoDatabase>();
-    var productsCollection = db.GetCollection<ShoeProduct>("Products");
+    var productsCollection = db.GetCollection<ShoeProduct>(ProductCatalogService.ProductsCollectionName);
+    var reservationsCollection = db.GetCollection<StockReservation>(ProductCatalogService.StockReservationsCollectionName);
 
-    // Index cho tìm kiếm và lọc nhanh
+    // Index cho tìm kiếm và lọc nhanh trên bảng Products
     productsCollection.Indexes.CreateMany(new[]
     {
         new CreateIndexModel<ShoeProduct>(Builders<ShoeProduct>.IndexKeys.Ascending(p => p.Category), new CreateIndexOptions { Name = "ix_category" }),
         new CreateIndexModel<ShoeProduct>(Builders<ShoeProduct>.IndexKeys.Ascending(p => p.Price), new CreateIndexOptions { Name = "ix_price" }),
         new CreateIndexModel<ShoeProduct>(Builders<ShoeProduct>.IndexKeys.Ascending("sizes.size"), new CreateIndexOptions { Name = "ix_sizes_size" })
+    });
+
+    // Index cho bảng StockReservations:
+    // - ux_orderId (Unique): Đảm bảo tính Lũy đẳng (Idempotency), chống khóa kho 2 lần cho cùng 1 OrderId
+    // - ix_status_expiresAt: Giúp Background Worker quét các phiên hết hạn 15 phút cực nhanh
+    reservationsCollection.Indexes.CreateMany(new[]
+    {
+        new CreateIndexModel<StockReservation>(
+            Builders<StockReservation>.IndexKeys.Ascending(r => r.OrderId),
+            new CreateIndexOptions { Unique = true, Name = "ux_orderId" }),
+        new CreateIndexModel<StockReservation>(
+            Builders<StockReservation>.IndexKeys.Ascending(r => r.Status).Ascending(r => r.ExpiresAt),
+            new CreateIndexOptions { Name = "ix_status_expiresAt" })
     });
 
     // Tự động Seed 6 mẫu giày Adidas thật nếu database trống

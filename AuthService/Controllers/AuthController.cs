@@ -498,6 +498,160 @@ public class AuthController : ControllerBase
         return Ok(new { message = "Đổi mật khẩu thành công. Các thiết bị khác đã bị đăng xuất.", tokens });
     }
 
+    // 13. Danh sách người dùng & lọc theo Role (Chỉ dành cho Admin)
+    [Authorize(Roles = AppRoles.Admin)]
+    [HttpGet("users")]
+    public async Task<IActionResult> GetUsers([FromQuery] string? role = null, [FromQuery] string? keyword = null)
+    {
+        var filterBuilder = Builders<User>.Filter;
+        var filter = filterBuilder.Empty;
+
+        if (!string.IsNullOrWhiteSpace(role))
+        {
+            if (!AppRoles.IsValid(role))
+            {
+                return BadRequest(new
+                {
+                    message = $"Role '{role}' không hợp lệ. Các giá trị hợp lệ: {string.Join(", ", AppRoles.All)}"
+                });
+            }
+            var normalizedRole = AppRoles.Normalize(role);
+            filter &= filterBuilder.Eq(u => u.Role, normalizedRole);
+        }
+
+        if (!string.IsNullOrWhiteSpace(keyword))
+        {
+            var kw = keyword.Trim();
+            filter &= filterBuilder.Regex(u => u.Email, new MongoDB.Bson.BsonRegularExpression(kw, "i")) |
+                      filterBuilder.Regex(u => u.FullName, new MongoDB.Bson.BsonRegularExpression(kw, "i"));
+        }
+
+        var users = await _usersCollection.Find(filter)
+            .SortByDescending(u => u.CreatedAt)
+            .Limit(200)
+            .ToListAsync();
+
+        var result = users.Select(u => new UserProfileResponse(
+            u.Id!,
+            u.Email,
+            u.FullName ?? "",
+            string.IsNullOrEmpty(u.Role) ? AppRoles.Customer : u.Role,
+            u.IsEmailVerified,
+            !string.IsNullOrEmpty(u.PasswordHash),
+            !string.IsNullOrEmpty(u.GoogleId),
+            u.CreatedAt)).ToList();
+
+        return Ok(new
+        {
+            totalCount = result.Count,
+            availableRoles = AppRoles.All,
+            items = result
+        });
+    }
+
+    // 14. Phân quyền / Cập nhật Role cho người dùng (Customer, Admin, LogisticsStaff, Driver - Chỉ dành cho Admin)
+    [Authorize(Roles = AppRoles.Admin)]
+    [HttpPatch("users/{id}/role")]
+    public async Task<IActionResult> UpdateUserRole(string id, [FromBody] UpdateUserRoleRequest req)
+    {
+        if (!AppRoles.IsValid(req.Role))
+        {
+            return BadRequest(new
+            {
+                message = $"Role '{req.Role}' không hợp lệ. Chỉ chấp nhận: {string.Join(", ", AppRoles.All)}",
+                allowedRoles = AppRoles.All
+            });
+        }
+
+        var normalizedRole = AppRoles.Normalize(req.Role);
+        var user = await _usersCollection.Find(u => u.Id == id).FirstOrDefaultAsync();
+        if (user == null)
+            return NotFound(new { message = "Không tìm thấy người dùng với ID này." });
+
+        var oldRole = string.IsNullOrEmpty(user.Role) ? AppRoles.Customer : user.Role;
+        user.Role = normalizedRole;
+
+        await _usersCollection.UpdateOneAsync(
+            u => u.Id == id,
+            Builders<User>.Update.Set(u => u.Role, normalizedRole));
+
+        // Thu hồi các Refresh Token cũ để bắt buộc làm mới Claims Role ở phiên đăng nhập tiếp theo
+        await _tokenService.RevokeAllForUserAsync(user.Id!, $"role-changed:{oldRole}->{normalizedRole}");
+
+        _logger.LogInformation("Admin {AdminId} đã cập nhật Role cho User {UserId} ({Email}): {OldRole} -> {NewRole}",
+            GetCurrentUserId(), user.Id, user.Email, oldRole, normalizedRole);
+
+        return Ok(new
+        {
+            message = $"Đã cập nhật quyền của '{user.Email}' từ '{oldRole}' sang '{normalizedRole}'.",
+            userId = user.Id,
+            email = user.Email,
+            fullName = user.FullName,
+            previousRole = oldRole,
+            newRole = normalizedRole
+        });
+    }
+
+    // 15. Cấp phát nhanh tài khoản Nhân viên Vận chuyển (LogisticsStaff) hoặc Tài xế (Driver) đã xác thực sẵn (Chỉ dành cho Admin)
+    [Authorize(Roles = AppRoles.Admin)]
+    [HttpPost("users/provision-staff")]
+    public async Task<IActionResult> ProvisionStaffUser([FromBody] ProvisionStaffUserRequest req)
+    {
+        if (!AppRoles.IsValid(req.Role))
+        {
+            return BadRequest(new
+            {
+                message = $"Role '{req.Role}' không hợp lệ. Chỉ chấp nhận: {string.Join(", ", AppRoles.All)}",
+                allowedRoles = AppRoles.All
+            });
+        }
+
+        var email = NormalizeEmail(req.Email);
+        var normalizedRole = AppRoles.Normalize(req.Role);
+        var existingUser = await FindByEmailAsync(email);
+        User targetUser;
+
+        if (existingUser != null)
+        {
+            var update = Builders<User>.Update
+                .Set(u => u.PasswordHash, BCrypt.Net.BCrypt.HashPassword(req.Password))
+                .Set(u => u.FullName, req.FullName.Trim())
+                .Set(u => u.Role, normalizedRole)
+                .Set(u => u.IsEmailVerified, true)
+                .Set(u => u.VerificationOtp, null)
+                .Set(u => u.OtpExpiresAt, null)
+                .Set(u => u.OtpFailedAttempts, 0);
+
+            await _usersCollection.UpdateOneAsync(u => u.Id == existingUser.Id, update);
+            existingUser.FullName = req.FullName.Trim();
+            existingUser.Role = normalizedRole;
+            existingUser.IsEmailVerified = true;
+            targetUser = existingUser;
+        }
+        else
+        {
+            targetUser = new User
+            {
+                Email = email,
+                PasswordHash = BCrypt.Net.BCrypt.HashPassword(req.Password),
+                FullName = req.FullName.Trim(),
+                Role = normalizedRole,
+                IsEmailVerified = true,
+                CreatedAt = DateTime.UtcNow
+            };
+
+            await _usersCollection.InsertOneAsync(targetUser);
+        }
+
+        var issuedAuth = await IssueTokensAsync(targetUser);
+
+        return Ok(new
+        {
+            message = $"Đã khởi tạo/cập nhật tài khoản '{normalizedRole}' ({email}) thành công và sẵn sàng sử dụng ngay.",
+            auth = issuedAuth
+        });
+    }
+
     // ===================== Helpers =====================
 
     private async Task<AuthResponse> IssueTokensAsync(User user)
@@ -512,7 +666,7 @@ public class AuthController : ControllerBase
             access.Token, access.ExpiresAt,
             refresh.Token, refresh.ExpiresAt,
             user.Email, user.FullName ?? "",
-            string.IsNullOrEmpty(user.Role) ? "Customer" : user.Role,
+            string.IsNullOrEmpty(user.Role) ? AppRoles.Customer : user.Role,
             user.Id!);
     }
 

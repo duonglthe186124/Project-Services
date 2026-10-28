@@ -38,9 +38,13 @@ public class ShoeProduct
     [BsonElement("sizes")]
     public List<SizeStock> Sizes { get; set; } = new();
 
-    // Tổng số lượng giày còn trong kho (tính tổng từ Sizes)
+    // Tổng số lượng giày còn có thể đặt mua trong kho (tính tổng từ Sizes.Quantity)
     [BsonElement("totalStock")]
     public int TotalStock => Sizes?.Sum(s => s.Quantity) ?? 0;
+
+    // Tổng số lượng giày đang được khóa tạm thời chờ khách thanh toán (tính tổng từ Sizes.ReservedQuantity)
+    [BsonElement("totalReservedStock")]
+    public int TotalReservedStock => Sizes?.Sum(s => s.ReservedQuantity) ?? 0;
 
     // Link ảnh đại diện chính
     [BsonElement("thumbnailUrl")]
@@ -82,7 +86,10 @@ public class SizeStock
     public int Size { get; set; } // Size giày EU (36, 37, 38, 39, 40, 41, 42, 43, 44, 45...)
 
     [BsonElement("quantity")]
-    public int Quantity { get; set; } // Số lượng còn trong kho của size này
+    public int Quantity { get; set; } // Số lượng khả dụng còn có thể đặt mua của size này
+
+    [BsonElement("reservedQuantity")]
+    public int ReservedQuantity { get; set; } = 0; // Số lượng đang bị khóa tạm thời chờ thanh toán (TTL 15 phút)
 }
 
 public class ShoeReview

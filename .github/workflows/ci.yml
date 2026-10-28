@@ -10,6 +10,12 @@ jobs:
   build-and-verify:
     runs-on: ubuntu-latest
 
+    services:
+      mongodb:
+        image: mongo:7.0
+        ports:
+          - 27017:27017
+
     steps:
       - name: 1. Checkout code
         uses: actions/checkout@v4
@@ -23,13 +29,25 @@ jobs:
         run: |
           dotnet restore AuthService/AuthService.csproj
           dotnet restore CatalogService/CatalogService.csproj
+          dotnet restore OrderService/OrderService.csproj
+          dotnet restore OrderService.Models.Tests/OrderService.Models.Tests.csproj
+          dotnet restore OrderService.Tests/OrderService.Tests.csproj
 
       - name: 4. Build projects
         run: |
           dotnet build AuthService/AuthService.csproj --no-restore --configuration Release
           dotnet build CatalogService/CatalogService.csproj --no-restore --configuration Release
+          dotnet build OrderService/OrderService.csproj --no-restore --configuration Release
 
-      - name: 5. Verify Docker Images build
+      - name: 5. Run OrderService Unit & Empirical Tests
+        env:
+          OrderDbSettings__ConnectionString: mongodb://localhost:27017
+        run: |
+          dotnet test OrderService.Models.Tests/OrderService.Models.Tests.csproj --configuration Release
+          dotnet test OrderService.Tests/OrderService.Tests.csproj --configuration Release
+
+      - name: 6. Verify Docker Images build
         run: |
           docker build -t auth-service:ci AuthService/
           docker build -t catalog-service:ci CatalogService/
+          docker build -t order-service:ci OrderService/

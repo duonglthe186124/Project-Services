@@ -3,6 +3,27 @@ using MongoDB.Bson;
 using System;
 
 namespace AuthService.Models;
+
+/// <summary>
+/// Chuẩn hóa danh sách các vai trò (RBAC Roles) trong toàn bộ hệ sinh thái Microservices.
+/// </summary>
+public static class AppRoles
+{
+    public const string Customer = "Customer";
+    public const string Admin = "Admin";
+    public const string LogisticsStaff = "LogisticsStaff";
+    public const string Driver = "Driver";
+
+    public static readonly string[] All = [Customer, Admin, LogisticsStaff, Driver];
+
+    public static bool IsValid(string? role) =>
+        !string.IsNullOrWhiteSpace(role) &&
+        All.Any(r => string.Equals(r, role.Trim(), StringComparison.OrdinalIgnoreCase));
+
+    public static string Normalize(string role) =>
+        All.First(r => string.Equals(r, role.Trim(), StringComparison.OrdinalIgnoreCase));
+}
+
 public class User
 {
     [BsonId]
@@ -18,9 +39,9 @@ public class User
     [BsonElement("isEmailVerified")]
     public bool IsEmailVerified { get; set; } = false;
 
-    // Phân quyền: "Customer" (mặc định) hoặc "Admin"
+    // Phân quyền: "Customer" (mặc định), "Admin", "LogisticsStaff", "Driver"
     [BsonElement("role")]
-    public string Role { get; set; } = "Customer";
+    public string Role { get; set; } = AppRoles.Customer;
 
     // Dành cho OTP đăng ký
     [BsonElement("verificationOtp")]

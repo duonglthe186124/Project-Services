@@ -135,4 +135,100 @@ public class CatalogController : ControllerBase
 
         return Ok(new { message = "Đã khôi phục sản phẩm mở bán trở lại thành công." });
     }
+
+    // ===================== SAGA / INTERNAL STOCK RESERVATION ENDPOINTS =====================
+
+    /// <summary>
+    /// [Saga Step 1] Tạm khóa tồn kho nguyên tử (Atomic Stock Reservation) theo OrderId + Size + Số lượng (TTL mặc định 15 phút).
+    /// Chống bán lố (Overselling F-01), hỗ trợ Idempotency theo OrderId, tự động Rollback nếu 1 đôi trong giỏ hết hàng, và trả về Snapshot giá chuẩn.
+    /// </summary>
+    [HttpPost("internal/stock/reserve")]
+    public async Task<IActionResult> ReserveStock([FromBody] ReserveStockRequest req)
+    {
+        var result = await _catalogService.ReserveStockAsync(req);
+        if (result.Success)
+            return Ok(result);
+
+        if (result.Status == "InvalidProductId")
+            return BadRequest(result);
+
+        return Conflict(result);
+    }
+
+    /// <summary>
+    /// [Saga Step 2a] Xác nhận xuất kho chính thức (Confirm Stock Deduction) sau khi khách thanh toán thành công hoặc duyệt đơn COD.
+    /// </summary>
+    [HttpPost("internal/stock/confirm")]
+    public async Task<IActionResult> ConfirmStock([FromBody] ConfirmStockRequest req)
+    {
+        var result = await _catalogService.ConfirmStockAsync(req);
+        if (result.Success)
+            return Ok(result);
+
+        if (result.Status == "NotFound")
+            return NotFound(result);
+
+        return Conflict(result);
+    }
+
+    /// <summary>
+    /// [Saga Step 2b / Compensation] Nhả tồn kho (Release Stock) cộng ngược lại vào kệ khi đơn hủy, lỗi thanh toán, quá hạn 15 phút hoặc hoàn hàng RTO.
+    /// Đảm bảo tính Lũy đẳng (Idempotent): Gọi nhiều lần tuyệt đối không cộng thừa tồn kho.
+    /// </summary>
+    [HttpPost("internal/stock/release")]
+    public async Task<IActionResult> ReleaseStock([FromBody] ReleaseStockRequest req)
+    {
+        var result = await _catalogService.ReleaseStockAsync(req);
+        if (result.Success)
+            return Ok(result);
+
+        if (result.Status == "NotFound")
+            return NotFound(result);
+
+        return Conflict(result);
+    }
+
+    /// <summary>
+    /// Tra cứu chi tiết phiên giữ hàng (StockReservation) theo OrderId.
+    /// </summary>
+    [HttpGet("internal/stock/reservations/{orderId}")]
+    public async Task<IActionResult> GetReservationByOrderId(string orderId)
+    {
+        var reservation = await _catalogService.GetReservationByOrderIdAsync(orderId);
+        if (reservation == null)
+            return NotFound(new { message = $"Không tìm thấy phiên giữ hàng cho OrderId '{orderId}'." });
+
+        return Ok(reservation);
+    }
+
+    /// <summary>
+    /// Xem danh sách các phiên giữ hàng trong kho (Hỗ trợ lọc theo status: Reserved, Confirmed, Released, Expired).
+    /// </summary>
+    [HttpGet("internal/stock/reservations")]
+    public async Task<IActionResult> GetReservations([FromQuery] string? status = null, [FromQuery] int limit = 50)
+    {
+        var reservations = await _catalogService.GetReservationsAsync(status, limit);
+        return Ok(new
+        {
+            totalCount = reservations.Count,
+            statusFilter = status,
+            items = reservations
+        });
+    }
+
+    /// <summary>
+    /// Kích hoạt quét và thu hồi ngay lập tức các phiên giữ hàng đã quá hạn TTL (Phục vụ kiểm thử nhanh trên Swagger).
+    /// </summary>
+    [HttpPost("internal/stock/cleanup-expired")]
+    public async Task<IActionResult> CleanupExpiredReservations(CancellationToken cancellationToken)
+    {
+        var releasedCount = await _catalogService.ReleaseExpiredReservationsAsync(cancellationToken);
+        return Ok(new
+        {
+            message = $"Đã quét và thu hồi tồn kho cho {releasedCount} phiên giữ hàng quá hạn.",
+            releasedCount,
+            sweptAtUtc = DateTime.UtcNow
+        });
+    }
 }
+
