@@ -1,0 +1,57 @@
+@Gateway_HostAddress = http://localhost:5000
+@JwtToken = YOUR_JWT_TOKEN_HERE
+
+### 1. Health check Gateway
+GET {{Gateway_HostAddress}}/health
+
+### 2. Xem danh sách sản phẩm qua Gateway (Forward sang CatalogService :5266)
+GET {{Gateway_HostAddress}}/api/catalog/products?page=1&pageSize=10
+Accept: application/json
+
+### 3. Đăng nhập qua Gateway (Forward sang AuthService :5265)
+POST {{Gateway_HostAddress}}/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "pot803709@gmail.com",
+  "password": "Password123@"
+}
+
+### 4. THỬ NGHIỆM TẤN CÔNG 1: Gọi endpoint giữ kho nội bộ qua Gateway -> BẮT BUỘC NHẬN 404 NOT FOUND
+POST {{Gateway_HostAddress}}/api/catalog/internal/stock/reserve
+Content-Type: application/json
+
+{
+  "orderId": "6ae1a222c90f41a9e11141be",
+  "items": []
+}
+
+### 5. THỬ NGHIỆM TẤN CÔNG 2: Gọi endpoint xuất kho nội bộ qua Gateway -> BẮT BUỘC NHẬN 404 NOT FOUND
+POST {{Gateway_HostAddress}}/api/catalog/internal/stock/confirm
+Content-Type: application/json
+
+{
+  "orderId": "6ae1a222c90f41a9e11141be",
+  "reason": "HackConfirm"
+}
+
+### 6. THỬ NGHIỆM TẤN CÔNG 3: Gọi endpoint nhả kho nội bộ qua Gateway -> BẮT BUỘC NHẬN 404 NOT FOUND
+POST {{Gateway_HostAddress}}/api/catalog/internal/stock/release
+Content-Type: application/json
+
+{
+  "orderId": "6ae1a222c90f41a9e11141be",
+  "reason": "HackRelease"
+}
+
+### 7. THỬ NGHIỆM TẤN CÔNG 4: Gọi endpoint duyệt thanh toán nội bộ qua Gateway -> BẮT BUỘC NHẬN 404 NOT FOUND
+POST {{Gateway_HostAddress}}/api/orders/internal/payment-callback
+Content-Type: application/json
+
+{
+  "orderId": "6ae1a222c90f41a9e11141be",
+  "paymentTransactionId": "FAKE-HACK-001",
+  "amount": 2790000,
+  "paymentMethod": "COD",
+  "status": "Success"
+}
