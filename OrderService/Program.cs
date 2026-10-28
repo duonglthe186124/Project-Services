@@ -16,7 +16,9 @@ var builder = WebApplication.CreateBuilder(args);
 // ============================================================================
 // 1. Cấu hình Configuration: Nạp appsettings.Development.json khi chạy local
 // ============================================================================
-builder.Configuration.AddJsonFile("appsettings.Development.json", optional: true, reloadOnChange: true);
+builder.Configuration
+    .AddJsonFile("appsettings.Development.json", optional: true, reloadOnChange: true)
+    .AddEnvironmentVariables();
 
 // ============================================================================
 // 2. Kết nối MongoDB OrderDb

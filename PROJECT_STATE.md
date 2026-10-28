@@ -155,12 +155,18 @@
        - Khi test trên máy tính cá nhân: có thể bấm trực tiếp trên Swagger `http://localhost:5268/swagger`. Khi muốn biểu diễn quét QR chuyển tiền thật trên điện thoại, chạy `ngrok http 5268` và dán link `https://xxxx.ngrok-free.app/api/payments/webhook/sepay` vào SePay.
     6. **Đồng bộ `EmailSettings` cho `OrderService`:** Đã bổ sung `SenderEmail` và `AppPassword` vào `OrderService/appsettings.Development.json` để đảm bảo khi `PaymentService` gọi `payment-callback` sang `OrderService`, khách hàng nhận được ngay Email HTML kèm mã vận đơn `WB-...`.
     7. **Bảo mật thông tin nhạy cảm qua file `.env` (Không hardcode trong `appsettings*.json`):** Toàn bộ `ConnectionString`, `JwtSettings__Secret`, `VietQrSettings__BankId|AccountNo|AccountName`, và `SePaySettings__ApiKey` của `PaymentService` đều để trống trong `appsettings.json` / `appsettings.Development.json` và được nạp tự động từ file `g:\c#\AuthService\.env` qua hàm `LoadDotEnvFile()` trong `PaymentService/Program.cs`.
+    8. **🛡️ Đã vá 5 Lỗ hổng Bảo mật Nghiệp vụ Thanh toán (Zero-Trust Payment Hardening - 28/10):**
+       - **Vá Lỗ hổng 1 (Chống sửa giá Amount Tampering & Toàn vẹn trạng thái Callback):** Khi khách gọi `POST /api/payments/create-qr` hoặc `POST /api/payments/process-cod`, `PaymentService` gọi trực tiếp `GET /api/orders/{orderId}` sang `OrderService` (kèm Bearer Token của khách) để lấy `TotalAmount` và `OrderCode` gốc. Nếu `request.Amount != snapshot.TotalAmount` -> chặn đứng ngay với **HTTP 400 Bad Request**. Đồng thời trong `HandleSePayWebhookAsync`, chỉ đánh dấu `tx.Status = Success` khi `OrderService` trả về `callbackResult.HttpSuccess == true`.
+       - **Vá Lỗ hổng 2 (Chống IDOR / Broken Object Level Authorization):** Kiểm tra chặt quyền sở hữu đơn hàng (`UserId` trong JWT phải khớp `Order.UserId` / `PaymentTransaction.UserId`, trừ `Admin`/`LogisticsStaff`) trên cả 3 API: `POST /api/payments/create-qr`, `POST /api/payments/process-cod`, và `GET /api/payments/order/{orderId}` (trả về **HTTP 403/404** nếu cố tình xem hoặc thanh toán đơn của người khác).
+       - **Vá Lỗ hổng 3 (Fail-Closed SePay Webhook & Khóa Nội Bộ `X-Internal-Api-Key`):** Loại bỏ cơ chế Fail-Open trên `POST /api/payments/webhook/sepay` (nếu thiếu cấu hình `SePaySettings:ApiKey` sẽ trả **HTTP 503** thay vì cho qua); loại bỏ việc bóc tách tiền tố `Bearer ` trong `ExtractSePayApiKey` (chỉ chấp nhận `Authorization: Apikey <key>` hoặc `X-SePay-Api-Key`); đồng bộ khóa `OrderService__InternalApiKey` = `InternalApi__Key` = `internal_adidas_saga_secret_2026` giữa `PaymentService` và `OrderService`.
+       - **Vá Lỗ hổng 4 (Rate Limiting Chống Brute-Force SePay Webhook):** Áp dụng Partitioned Rate Limiter riêng cho nhánh `/api/payments/webhook/sepay` với giới hạn nghiêm ngặt **20 requests/phút/IP** (`QueueLimit = 0`, trả về **HTTP 429 Too Many Requests**) tại cả `ApiGateway` và `PaymentService`.
+       - **Vá Lỗ hổng 5 (Xác thực Số Tài Khoản Ngân Hàng Đích):** Trong `HandleSePayWebhookAsync`, đối chiếu `payload.AccountNumber` từ SePay với `_vietQr.AccountNo` của cửa hàng; nếu lệch trả về ngay **HTTP 400 Bad Request**.
 - ~~**Service 5 (Sprint 4): `ShippingService`**~~ -> **ĐÃ LƯỢC BỎ** (Thay thế bằng cơ chế tự động sinh `WaybillCode` + gửi Email hóa đơn/vận đơn qua `MailKit` ngay trong `OrderService`).
 - **Service 6 (✅ ĐÃ HOÀN TẤT & VERIFIED TOÀN TRÌNH 100%): `ApiGateway` (Port `5000:8080`)**:
   - **Công nghệ & Kiến trúc:**
     - YARP (Yet Another Reverse Proxy) .NET 8, chạy cổng `http://localhost:5000/swagger`.
     - Đóng vai trò là Cửa ngõ duy nhất (Single Point of Entry) cho toàn bộ Client (Frontend Web React/Vue/Flutter, Mobile App, SePay Webhook).
-    - Tập trung quản lý CORS (`AllowAll` cho dev), Rate Limiter (150 req/phút), và Aggregated Swagger UI hiển thị thông tin 4 microservices.
+    - Tập trung quản lý CORS (`AllowAll` cho dev), Rate Limiter phân tầng (150 req/phút cho API chung; **20 req/phút/IP** chống brute-force riêng cho `/api/payments/webhook`), và Aggregated Swagger UI hiển thị thông tin 4 microservices.
   - **Lá chắn an ninh 2 lớp (Defense-in-Depth):**
     1. **`InternalEndpointBlockerMiddleware`:** Chặn đứng 100% mọi request từ ngoài Internet cố tình truy cập vào các endpoint nội bộ chứa segment `/internal/` (khoảng giữ kho `/api/catalog/internal/stock/reserve`, xuất kho `/confirm`, nhả kho `/release`, và callback thanh toán `/api/orders/internal/payment-callback`). Trả về ngay **HTTP 404 Not Found** (chuẩn Zero-Trust để đánh lừa kẻ tấn công).
     2. **Chống giả mạo Header (`X-Internal-Api-Key`):** Tự động bóc gỡ (`strip`) toàn bộ header nội bộ nếu client bên ngoài cố tình gửi lên.
@@ -192,9 +198,10 @@ PaymentDbSettings__DatabaseName=PaymentDb
 JwtSettings__Secret=Chuoi_Khoa_Bi_Mat_Cuc_Ky_Dai_It_Nhat_32_Ky_Tu_Random_123456!
 JwtSettings__Issuer=AuthService
 JwtSettings__Audience=AuthServiceUsers
-# PaymentService - VietQR & SePay
+# PaymentService - VietQR & SePay & Internal Saga Security
 OrderService__BaseUrl=http://localhost:5267
-OrderService__InternalApiKey=
+OrderService__InternalApiKey=internal_adidas_saga_secret_2026
+InternalApi__Key=internal_adidas_saga_secret_2026
 VietQrSettings__BankId=MB
 VietQrSettings__AccountNo=0987654321
 VietQrSettings__AccountName=LE TUNG DUONG
@@ -205,6 +212,13 @@ SePaySettings__ApiKey=sepay_adidas_secret_2026
 ---
 
 ## 4. NHẬT KÝ ĐIỀU CHỈNH GẦN NHẤT (CHANGELOG)
+### 🛡️ Security Patch & CI/CD Release (28/10): Vá 5 Lỗ Hổng Bảo Mật `PaymentService`, `OrderService` & `ApiGateway`
+1. **Zero-Trust Pricing Verification (`PaymentProcessingService` & `OrderCallbackClient`):** Chặn tấn công sửa giá (`Amount Tampering`) khi tạo QR hoặc chọn COD bằng cách gọi ngược sang `GET /api/orders/{orderId}` của `OrderService` để lấy `TotalAmount` và `OrderCode` chuẩn xác.
+2. **Chống IDOR (`PaymentsController` & `PaymentProcessingService`):** Bắt buộc kiểm tra `UserId` sở hữu đơn hàng trên `POST /api/payments/create-qr`, `POST /api/payments/process-cod` và `GET /api/payments/order/{orderId}`.
+3. **Fail-Closed Webhook & Internal API Key:** Bắt buộc cấu hình `SePaySettings:ApiKey` (trả `503` nếu để trống), chỉ nhận header `Apikey <key>` hoặc `X-SePay-Api-Key` (loại bỏ nhầm lẫn với `Bearer`), và bật xác thực `X-Internal-Api-Key` giữa `PaymentService` -> `OrderService`.
+4. **Rate Limiting Chuyên Biệt Cho Webhook:** Giới hạn **20 req/phút/IP** (`QueueLimit = 0`) cho `/api/payments/webhook/sepay` tại cả `ApiGateway` và `PaymentService`.
+5. **Xác Thực Số Tài Khoản Thụ Hưởng (`HandleSePayWebhookAsync`):** Chặn đứng các gói tin Webhook có `accountNumber` không khớp với `VietQrSettings:AccountNo`.
+6. **Container hóa & GitHub Actions CI:** Hoàn thiện `Dockerfile`, `.dockerignore`, `docker-compose.yml`, và `.github/workflows/ci.yml` (kèm service container `mongo:7.0`) cho toàn bộ 5 dịch vụ (`AuthService`, `CatalogService`, `OrderService`, `PaymentService`, `ApiGateway`).
 ### 🚀 Sprint 2 – Milestone 3 (25/10): `OrderService` Saga Engine OCC + Cancel + Payment Callback
 1. Thêm `OrderSagaOrchestrator` (chuyển trạng thái nguyên tử theo Version), `OrderQueryService`, ma trận `SagaTransitions`, `PaymentCallbackPolicy`, `OrderAccessPolicy`.
 2. Thêm 5 API `/api/orders` (my-orders, list cho staff, chi tiết, timeline, cancel) và API nội bộ `/api/orders/internal/payment-callback` (header `X-Internal-Api-Key`).

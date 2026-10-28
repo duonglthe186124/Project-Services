@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,16 +15,16 @@ namespace PaymentService.Services;
 public interface IPaymentProcessingService
 {
     Task<(bool Success, int StatusCode, PaymentTransactionDto? Data, string Message)> ProcessCodAsync(
-        ProcessCodRequest request, string? userId, CancellationToken ct = default);
+        ProcessCodRequest request, string? userId, bool isAdmin, string? bearerToken, CancellationToken ct = default);
 
     Task<(bool Success, int StatusCode, PaymentTransactionDto? Data, string Message)> CreateQrPaymentAsync(
-        CreateQrRequest request, string? userId, CancellationToken ct = default);
+        CreateQrRequest request, string? userId, bool isAdmin, string? bearerToken, CancellationToken ct = default);
 
     Task<(int StatusCode, SePayWebhookResponse Response)> HandleSePayWebhookAsync(
         SePayWebhookPayload payload, CancellationToken ct = default);
 
-    Task<IReadOnlyList<PaymentTransactionDto>> GetTransactionsByOrderIdAsync(
-        string orderId, CancellationToken ct = default);
+    Task<(bool Allowed, int StatusCode, IReadOnlyList<PaymentTransactionDto> Data, string Message)> GetTransactionsByOrderIdAsync(
+        string orderId, string? currentUserId, bool isAdminOrStaff, CancellationToken ct = default);
 }
 
 public class PaymentProcessingService : IPaymentProcessingService
@@ -48,12 +49,35 @@ public class PaymentProcessingService : IPaymentProcessingService
     }
 
     public async Task<(bool Success, int StatusCode, PaymentTransactionDto? Data, string Message)> ProcessCodAsync(
-        ProcessCodRequest request, string? userId, CancellationToken ct = default)
+        ProcessCodRequest request, string? userId, bool isAdmin, string? bearerToken, CancellationToken ct = default)
     {
-        var normalizedOrderCode = _vietQr.ExtractNormalizedOrderCode(request.OrderCode) ?? request.OrderCode.Trim().ToUpperInvariant();
+        // 1. ZERO-TRUST: Xác thực quyền sở hữu đơn và đối chiếu TotalAmount gốc từ OrderService
+        var snapshot = await _orderCallback.GetOrderSnapshotAsync(request.OrderId, bearerToken, ct);
+        if (!snapshot.Found)
+        {
+            return (false, snapshot.HttpStatusCode, null, snapshot.Message);
+        }
+
+        if (request.Amount != snapshot.TotalAmount)
+        {
+            _logger.LogWarning("[SECURITY-ALERT] Phát hiện sai lệch số tiền khi chọn COD cho OrderId={OrderId}: Client gửi {ClientAmount} != OrderService {RealAmount}.",
+                request.OrderId, request.Amount, snapshot.TotalAmount);
+            return (false, 400, null,
+                $"Số tiền thanh toán ({request.Amount:N0}đ) không khớp tổng tiền đơn hàng trên hệ thống ({snapshot.TotalAmount:N0}đ).");
+        }
+
+        var authoritativeOrderCode = !string.IsNullOrWhiteSpace(snapshot.OrderCode)
+            ? snapshot.OrderCode.Trim().ToUpperInvariant()
+            : (_vietQr.ExtractNormalizedOrderCode(request.OrderCode) ?? request.OrderCode.Trim().ToUpperInvariant());
+
+        if (!string.Equals(authoritativeOrderCode, (_vietQr.ExtractNormalizedOrderCode(request.OrderCode) ?? request.OrderCode.Trim().ToUpperInvariant()), StringComparison.OrdinalIgnoreCase))
+        {
+            return (false, 400, null, $"Mã đơn hàng gửi lên ({request.OrderCode}) không khớp với OrderId ({authoritativeOrderCode}).");
+        }
+
         var now = DateTime.UtcNow;
 
-        // Kiểm tra xem đơn này đã có giao dịch COD trước đó chưa (Idempotency)
+        // 2. Kiểm tra xem đơn này đã có giao dịch COD trước đó chưa (Idempotency + IDOR check)
         var existing = await _transactions
             .Find(t => t.OrderId == request.OrderId && t.PaymentMethod == PaymentMethodTypes.Cod)
             .SortByDescending(t => t.CreatedAt)
@@ -62,6 +86,11 @@ public class PaymentProcessingService : IPaymentProcessingService
         PaymentTransaction tx;
         if (existing is not null)
         {
+            if (!isAdmin && !string.IsNullOrWhiteSpace(existing.UserId) && !string.Equals(existing.UserId, userId, StringComparison.Ordinal))
+            {
+                _logger.LogWarning("[SECURITY-ALERT] Chặn IDOR trên ProcessCod: User {UserId} cố thao tác đơn của {OwnerId}.", userId, existing.UserId);
+                return (false, 403, null, "Bạn không có quyền thao tác thanh toán trên đơn hàng của người khác.");
+            }
             tx = existing;
         }
         else
@@ -70,19 +99,19 @@ public class PaymentProcessingService : IPaymentProcessingService
             {
                 TransactionCode = GenerateTransactionCode("COD"),
                 OrderId = request.OrderId,
-                OrderCode = normalizedOrderCode,
-                UserId = userId,
-                Amount = request.Amount,
+                OrderCode = authoritativeOrderCode,
+                UserId = snapshot.UserId ?? userId,
+                Amount = snapshot.TotalAmount,
                 PaymentMethod = PaymentMethodTypes.Cod,
                 Status = PaymentStatusConstants.Pending,
-                TransferContent = $"COD {normalizedOrderCode}",
+                TransferContent = $"COD {authoritativeOrderCode}",
                 CreatedAt = now,
                 UpdatedAt = now
             };
             await _transactions.InsertOneAsync(tx, cancellationToken: ct);
         }
 
-        // Gọi ngay sang OrderService để xác nhận đơn hàng COD -> trừ kho -> sinh mã vận đơn -> gửi Email
+        // 3. Gọi sang OrderService để xác nhận đơn hàng COD -> trừ kho -> sinh mã vận đơn -> gửi Email
         var callbackPayload = new OrderPaymentCallbackPayload(
             OrderId: tx.OrderId,
             PaymentTransactionId: tx.TransactionCode,
@@ -112,13 +141,36 @@ public class PaymentProcessingService : IPaymentProcessingService
     }
 
     public async Task<(bool Success, int StatusCode, PaymentTransactionDto? Data, string Message)> CreateQrPaymentAsync(
-        CreateQrRequest request, string? userId, CancellationToken ct = default)
+        CreateQrRequest request, string? userId, bool isAdmin, string? bearerToken, CancellationToken ct = default)
     {
-        var normalizedOrderCode = _vietQr.ExtractNormalizedOrderCode(request.OrderCode) ?? request.OrderCode.Trim().ToUpperInvariant();
-        var qrUrl = _vietQr.GenerateQrImageUrl(request.Amount, normalizedOrderCode);
+        // 1. ZERO-TRUST: Xác thực quyền sở hữu đơn và lấy TotalAmount chuẩn từ OrderService (chống sửa giá khi tạo QR)
+        var snapshot = await _orderCallback.GetOrderSnapshotAsync(request.OrderId, bearerToken, ct);
+        if (!snapshot.Found)
+        {
+            return (false, snapshot.HttpStatusCode, null, snapshot.Message);
+        }
+
+        if (request.Amount != snapshot.TotalAmount)
+        {
+            _logger.LogWarning("[SECURITY-ALERT] Phát hiện tấn công sửa giá (Amount Tampering) khi tạo QR cho OrderId={OrderId}: Client gửi {ClientAmount} != OrderService {RealAmount}.",
+                request.OrderId, request.Amount, snapshot.TotalAmount);
+            return (false, 400, null,
+                $"Số tiền tạo mã QR ({request.Amount:N0}đ) không khớp tổng tiền đơn hàng trên hệ thống ({snapshot.TotalAmount:N0}đ).");
+        }
+
+        var authoritativeOrderCode = !string.IsNullOrWhiteSpace(snapshot.OrderCode)
+            ? snapshot.OrderCode.Trim().ToUpperInvariant()
+            : (_vietQr.ExtractNormalizedOrderCode(request.OrderCode) ?? request.OrderCode.Trim().ToUpperInvariant());
+
+        if (!string.Equals(authoritativeOrderCode, (_vietQr.ExtractNormalizedOrderCode(request.OrderCode) ?? request.OrderCode.Trim().ToUpperInvariant()), StringComparison.OrdinalIgnoreCase))
+        {
+            return (false, 400, null, $"Mã đơn hàng gửi lên ({request.OrderCode}) không khớp với OrderId ({authoritativeOrderCode}).");
+        }
+
+        var qrUrl = _vietQr.GenerateQrImageUrl(snapshot.TotalAmount, authoritativeOrderCode);
         var now = DateTime.UtcNow;
 
-        // Nếu đã có giao dịch Online_QR đang Pending cho OrderId này thì cập nhật lại và trả về
+        // 2. Nếu đã có giao dịch Online_QR cho OrderId này thì kiểm tra quyền sở hữu và giữ nguyên Amount gốc
         var existing = await _transactions
             .Find(t => t.OrderId == request.OrderId && t.PaymentMethod == PaymentMethodTypes.OnlineQr)
             .SortByDescending(t => t.CreatedAt)
@@ -126,16 +178,23 @@ public class PaymentProcessingService : IPaymentProcessingService
 
         if (existing is not null)
         {
+            if (!isAdmin && !string.IsNullOrWhiteSpace(existing.UserId) && !string.Equals(existing.UserId, userId, StringComparison.Ordinal))
+            {
+                _logger.LogWarning("[SECURITY-ALERT] Chặn IDOR trên CreateQr: User {UserId} cố thao tác đơn của {OwnerId}.", userId, existing.UserId);
+                return (false, 403, null, "Bạn không có quyền tạo mã thanh toán cho đơn hàng của người khác.");
+            }
+
             if (existing.Status == PaymentStatusConstants.Success)
             {
                 var paidDto = MapToDto(existing, "Đơn hàng này đã được thanh toán thành công trước đó.");
                 return (true, 200, paidDto, paidDto.Message);
             }
 
-            existing.OrderCode = normalizedOrderCode;
-            existing.Amount = request.Amount;
+            // Tuyệt đối giữ đúng snapshot.TotalAmount từ OrderService
+            existing.OrderCode = authoritativeOrderCode;
+            existing.Amount = snapshot.TotalAmount;
             existing.QrImageUrl = qrUrl;
-            existing.TransferContent = normalizedOrderCode;
+            existing.TransferContent = authoritativeOrderCode;
             existing.UpdatedAt = now;
 
             await _transactions.ReplaceOneAsync(t => t.Id == existing.Id, existing, cancellationToken: ct);
@@ -147,13 +206,13 @@ public class PaymentProcessingService : IPaymentProcessingService
         {
             TransactionCode = GenerateTransactionCode("QR"),
             OrderId = request.OrderId,
-            OrderCode = normalizedOrderCode,
-            UserId = userId,
-            Amount = request.Amount,
+            OrderCode = authoritativeOrderCode,
+            UserId = snapshot.UserId ?? userId,
+            Amount = snapshot.TotalAmount,
             PaymentMethod = PaymentMethodTypes.OnlineQr,
             Status = PaymentStatusConstants.Pending,
             QrImageUrl = qrUrl,
-            TransferContent = normalizedOrderCode,
+            TransferContent = authoritativeOrderCode,
             CreatedAt = now,
             UpdatedAt = now
         };
@@ -174,7 +233,19 @@ public class PaymentProcessingService : IPaymentProcessingService
             return (200, new SePayWebhookResponse(true, "Bỏ qua giao dịch tiền ra (transferType != 'in')."));
         }
 
-        // 2. Kiểm tra chống trùng theo SePayTransactionId
+        // 2. Xác thực số tài khoản ngân hàng nhận tiền (chống giả mạo payload từ TK khác)
+        if (!string.IsNullOrWhiteSpace(payload.AccountNumber) &&
+            !string.IsNullOrWhiteSpace(_vietQr.AccountNo) &&
+            !string.Equals(payload.AccountNumber.Trim(), _vietQr.AccountNo.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning("[SECURITY-ALERT] Webhook SePay Id={Id}: Số tài khoản nhận tiền ({PayloadAcc}) không khớp với STK cửa hàng ({ShopAcc}).",
+                payload.Id, payload.AccountNumber, _vietQr.AccountNo);
+            return (400, new SePayWebhookResponse(
+                false,
+                $"Số tài khoản nhận tiền ({payload.AccountNumber}) không khớp với tài khoản cấu hình của cửa hàng."));
+        }
+
+        // 3. Kiểm tra chống trùng theo SePayTransactionId
         if (payload.Id > 0)
         {
             var duplicate = await _transactions
@@ -193,7 +264,7 @@ public class PaymentProcessingService : IPaymentProcessingService
             }
         }
 
-        // 3. Trích xuất OrderCode (ADI-yyyyMMdd-XXXXXX) từ content / description / code
+        // 4. Trích xuất OrderCode (ADI-yyyyMMdd-XXXXXX) từ content / description / code
         var orderCode = _vietQr.ExtractNormalizedOrderCode(payload.Content)
                         ?? _vietQr.ExtractNormalizedOrderCode(payload.Description)
                         ?? _vietQr.ExtractNormalizedOrderCode(payload.Code);
@@ -205,7 +276,7 @@ public class PaymentProcessingService : IPaymentProcessingService
             return (200, new SePayWebhookResponse(true, "Giao dịch không chứa mã đơn hàng ADI-..., bỏ qua."));
         }
 
-        // 4. Tìm phiên thanh toán tương ứng theo OrderCode
+        // 5. Tìm phiên thanh toán tương ứng theo OrderCode
         var tx = await _transactions
             .Find(t => t.OrderCode == orderCode)
             .SortByDescending(t => t.CreatedAt)
@@ -218,7 +289,7 @@ public class PaymentProcessingService : IPaymentProcessingService
             return (200, new SePayWebhookResponse(false, $"Không tìm thấy giao dịch chờ thanh toán nào cho mã đơn {orderCode}.", null, orderCode));
         }
 
-        // 5. Đối chiếu số tiền chuyển khoản
+        // 6. Đối chiếu số tiền chuyển khoản
         if (payload.TransferAmount < tx.Amount)
         {
             _logger.LogWarning("Webhook SePay Id={Id} cho đơn {OrderCode}: Khách chuyển {TransferAmount} < {RequiredAmount}.",
@@ -231,7 +302,7 @@ public class PaymentProcessingService : IPaymentProcessingService
                 tx.TransactionCode));
         }
 
-        // 6. Cập nhật thông tin giao dịch từ SePay và bắn callback sang OrderService
+        // 7. Gọi callback sang OrderService trước rồi mới chốt trạng thái Success/Failed (đảm bảo tính toàn vẹn dữ liệu)
         var now = DateTime.UtcNow;
         if (payload.Id > 0)
         {
@@ -240,9 +311,6 @@ public class PaymentProcessingService : IPaymentProcessingService
         tx.Gateway = payload.Gateway;
         tx.ReferenceCode = payload.ReferenceCode;
         tx.TransferContent = payload.Content;
-        tx.Status = PaymentStatusConstants.Success;
-        tx.PaidAt = now;
-        tx.UpdatedAt = now;
 
         var callbackPayload = new OrderPaymentCallbackPayload(
             OrderId: tx.OrderId,
@@ -254,15 +322,16 @@ public class PaymentProcessingService : IPaymentProcessingService
 
         var callbackResult = await _orderCallback.SendPaymentCallbackAsync(callbackPayload, ct);
 
+        tx.Status = callbackResult.HttpSuccess ? PaymentStatusConstants.Success : PaymentStatusConstants.Failed;
         tx.CallbackSent = callbackResult.HttpSuccess;
         tx.OrderCallbackStatus = callbackResult.OrderStatus;
+        tx.PaidAt = callbackResult.HttpSuccess ? now : null;
         tx.UpdatedAt = DateTime.UtcNow;
 
         await _transactions.ReplaceOneAsync(t => t.Id == tx.Id, tx, cancellationToken: ct);
 
         if (!callbackResult.HttpSuccess && callbackResult.HttpStatusCode >= 500)
         {
-            // Trả 503 để SePay tự động retry webhook nếu OrderService tạm thời mất kết nối
             return (503, new SePayWebhookResponse(
                 false,
                 callbackResult.Message,
@@ -281,13 +350,26 @@ public class PaymentProcessingService : IPaymentProcessingService
             callbackResult.OrderStatus));
     }
 
-    public async Task<IReadOnlyList<PaymentTransactionDto>> GetTransactionsByOrderIdAsync(
-        string orderId, CancellationToken ct = default)
+    public async Task<(bool Allowed, int StatusCode, IReadOnlyList<PaymentTransactionDto> Data, string Message)> GetTransactionsByOrderIdAsync(
+        string orderId, string? currentUserId, bool isAdminOrStaff, CancellationToken ct = default)
     {
         var list = await _transactions
             .Find(t => t.OrderId == orderId)
             .SortByDescending(t => t.CreatedAt)
             .ToListAsync(ct);
+
+        if (list.Count == 0)
+        {
+            return (true, 200, Array.Empty<PaymentTransactionDto>(), "Chưa có giao dịch thanh toán nào cho đơn hàng này.");
+        }
+
+        // Chống IDOR: Nếu không phải Admin hoặc LogisticsStaff thì bắt buộc phải là chủ đơn hàng
+        if (!isAdminOrStaff && list.Any(t => !string.IsNullOrWhiteSpace(t.UserId) && !string.Equals(t.UserId, currentUserId, StringComparison.Ordinal)))
+        {
+            _logger.LogWarning("[SECURITY-ALERT] Chặn IDOR trên GetTransactionsByOrderId: User {UserId} cố xem giao dịch của OrderId={OrderId}.",
+                currentUserId, orderId);
+            return (false, 403, Array.Empty<PaymentTransactionDto>(), "Bạn không có quyền xem lịch sử giao dịch của đơn hàng người khác.");
+        }
 
         var result = new List<PaymentTransactionDto>(list.Count);
         foreach (var tx in list)
@@ -297,7 +379,7 @@ public class PaymentProcessingService : IPaymentProcessingService
                 : "Đang chờ thanh toán."));
         }
 
-        return result;
+        return (true, 200, result, "OK");
     }
 
     private PaymentTransactionDto MapToDto(PaymentTransaction tx, string message)

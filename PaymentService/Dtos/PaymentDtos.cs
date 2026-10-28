@@ -140,3 +140,17 @@ public record OrderPaymentCallbackResult(
     bool IsReplay,
     bool RefundRequired,
     string Message);
+
+/// <summary>
+/// Snapshot thông tin gốc của đơn hàng lấy từ OrderService (Zero-Trust Pricing & Ownership Verification).
+/// </summary>
+public record OrderSnapshotResult(
+    bool Found,
+    int HttpStatusCode,
+    string? OrderId,
+    string? OrderCode,
+    string? UserId,
+    decimal TotalAmount,
+    string? OrderStatus,
+    string Message);
+

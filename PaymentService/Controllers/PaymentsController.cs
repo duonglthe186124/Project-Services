@@ -42,12 +42,17 @@ public class PaymentsController : ControllerBase
     [Authorize(Roles = "Customer,Admin")]
     [ProducesResponseType(typeof(PaymentTransactionDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> ProcessCod([FromBody] ProcessCodRequest request, CancellationToken ct)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub");
-        var (success, statusCode, data, message) = await _paymentService.ProcessCodAsync(request, userId, ct);
+        var isAdmin = User.IsInRole("Admin");
+        var bearerToken = ExtractBearerToken(Request.Headers.Authorization.ToString());
+
+        var (success, statusCode, data, message) = await _paymentService.ProcessCodAsync(
+            request, userId, isAdmin, bearerToken, ct);
 
         if (success)
         {
@@ -66,39 +71,56 @@ public class PaymentsController : ControllerBase
     [ProducesResponseType(typeof(PaymentTransactionDto), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(PaymentTransactionDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> CreateQr([FromBody] CreateQrRequest request, CancellationToken ct)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub");
-        var (_, statusCode, data, _) = await _paymentService.CreateQrPaymentAsync(request, userId, ct);
-        return StatusCode(statusCode, data);
+        var isAdmin = User.IsInRole("Admin");
+        var bearerToken = ExtractBearerToken(Request.Headers.Authorization.ToString());
+
+        var (success, statusCode, data, message) = await _paymentService.CreateQrPaymentAsync(
+            request, userId, isAdmin, bearerToken, ct);
+
+        if (success)
+        {
+            return StatusCode(statusCode, data);
+        }
+
+        return StatusCode(statusCode, new { message, transaction = data });
     }
 
     /// <summary>
     /// Nhánh 2 (Bước 2): Webhook nhận biến động số dư tự động từ SePay.vn.
     /// Xác thực qua header "Authorization: Apikey {SePayApiKey}" (hoặc nhập vào ô X-SePay-Api-Key khi test trên Swagger).
+    /// Bắt buộc Fail-Closed: Nếu chưa cấu hình SePaySettings:ApiKey thì từ chối 100% request.
     /// </summary>
     [HttpPost("webhook/sepay")]
     [AllowAnonymous]
     [ProducesResponseType(typeof(SePayWebhookResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> SePayWebhook(
         [FromBody] SePayWebhookPayload payload,
         [FromHeader(Name = "X-SePay-Api-Key")] string? swaggerApiKey = null,
         CancellationToken ct = default)
     {
         var configuredKey = _config["SePaySettings:ApiKey"];
-        if (!string.IsNullOrWhiteSpace(configuredKey))
+        if (string.IsNullOrWhiteSpace(configuredKey))
         {
-            var providedKey = ExtractSePayApiKey(Request.Headers.Authorization.ToString(), swaggerApiKey);
-            if (!IsConstantTimeEqual(configuredKey, providedKey))
-            {
-                _logger.LogWarning("Từ chối SePay Webhook Id={Id}: Sai hoặc thiếu SePay API Key.", payload.Id);
-                return Unauthorized(new { success = false, message = "Sai hoặc thiếu SePay API Key." });
-            }
+            _logger.LogCritical(
+                "BẢO MẬT (Fail-Closed): Từ chối SePay Webhook Id={Id} vì hệ thống chưa cấu hình SePaySettings:ApiKey!",
+                payload.Id);
+            return StatusCode(
+                StatusCodes.Status503ServiceUnavailable,
+                new { success = false, message = "Webhook chưa được kích hoạt (Thiếu cấu hình SePaySettings:ApiKey)." });
         }
-        else
+
+        var providedKey = ExtractSePayApiKey(Request.Headers.Authorization.ToString(), swaggerApiKey);
+        if (!IsConstantTimeEqual(configuredKey, providedKey))
         {
-            _logger.LogWarning("SePaySettings:ApiKey đang để trống. Chấp nhận webhook không xác thực (chỉ dùng cho môi trường dev).");
+            _logger.LogWarning("Từ chối SePay Webhook Id={Id}: Sai hoặc thiếu SePay API Key.", payload.Id);
+            return Unauthorized(new { success = false, message = "Sai hoặc thiếu SePay API Key." });
         }
 
         var (statusCode, response) = await _paymentService.HandleSePayWebhookAsync(payload, ct);
@@ -106,15 +128,43 @@ public class PaymentsController : ControllerBase
     }
 
     /// <summary>
-    /// Tra cứu danh sách giao dịch thanh toán của một đơn hàng theo OrderId.
+    /// Tra cứu danh sách giao dịch thanh toán của một đơn hàng theo OrderId (Có kiểm tra quyền sở hữu chống IDOR).
     /// </summary>
     [HttpGet("order/{orderId}")]
     [Authorize]
     [ProducesResponseType(typeof(IReadOnlyList<PaymentTransactionDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> GetByOrderId(string orderId, CancellationToken ct)
     {
-        var list = await _paymentService.GetTransactionsByOrderIdAsync(orderId, ct);
-        return Ok(list);
+        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub");
+        var isAdminOrStaff = User.IsInRole("Admin") || User.IsInRole("LogisticsStaff");
+
+        var (allowed, statusCode, data, message) = await _paymentService.GetTransactionsByOrderIdAsync(
+            orderId, userId, isAdminOrStaff, ct);
+
+        if (!allowed || statusCode != StatusCodes.Status200OK)
+        {
+            return StatusCode(statusCode, new { message });
+        }
+
+        return Ok(data);
+    }
+
+    public static string? ExtractBearerToken(string? authorizationHeader)
+    {
+        if (string.IsNullOrWhiteSpace(authorizationHeader))
+        {
+            return null;
+        }
+
+        var trimmed = authorizationHeader.Trim();
+        if (trimmed.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+        {
+            return trimmed["Bearer ".Length..].Trim();
+        }
+
+        return null;
     }
 
     public static string? ExtractSePayApiKey(string? authorizationHeader, string? fallbackHeader)
@@ -135,12 +185,8 @@ public class PaymentsController : ControllerBase
             return trimmed["Apikey ".Length..].Trim();
         }
 
-        if (trimmed.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
-        {
-            return trimmed["Bearer ".Length..].Trim();
-        }
-
-        return trimmed;
+        // Tuyệt đối không bóc tách "Bearer " tại đây để tránh nhầm lẫn giữa JWT của User và API Key của SePay
+        return null;
     }
 
     public static bool IsConstantTimeEqual(string expected, string? actual)

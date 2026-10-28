@@ -38,7 +38,7 @@ builder.Services.AddCors(options =>
 });
 
 // ============================================================================
-// 3. Rate Limiter (Chống DDoS / Brute-force)
+// 3. Rate Limiter (Chống DDoS / Brute-force; giới hạn chặt 20 req/phút cho Webhook)
 // ============================================================================
 builder.Services.AddRateLimiter(options =>
 {
@@ -46,7 +46,20 @@ builder.Services.AddRateLimiter(options =>
     options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
     {
         var clientIp = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-        return RateLimitPartition.GetFixedWindowLimiter(clientIp, _ => new FixedWindowRateLimiterOptions
+        var path = httpContext.Request.Path.Value ?? string.Empty;
+
+        if (path.StartsWith("/api/payments/webhook", StringComparison.OrdinalIgnoreCase))
+        {
+            return RateLimitPartition.GetFixedWindowLimiter($"gw-webhook:{clientIp}", _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 20,
+                Window = TimeSpan.FromMinutes(1),
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                QueueLimit = 0
+            });
+        }
+
+        return RateLimitPartition.GetFixedWindowLimiter($"gw-general:{clientIp}", _ => new FixedWindowRateLimiterOptions
         {
             PermitLimit = 150,
             Window = TimeSpan.FromMinutes(1),
