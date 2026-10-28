@@ -32,12 +32,14 @@ jobs:
           dotnet restore OrderService/OrderService.csproj
           dotnet restore OrderService.Models.Tests/OrderService.Models.Tests.csproj
           dotnet restore OrderService.Tests/OrderService.Tests.csproj
+          dotnet restore PaymentService/PaymentService.csproj
 
       - name: 4. Build projects
         run: |
           dotnet build AuthService/AuthService.csproj --no-restore --configuration Release
           dotnet build CatalogService/CatalogService.csproj --no-restore --configuration Release
           dotnet build OrderService/OrderService.csproj --no-restore --configuration Release
+          dotnet build PaymentService/PaymentService.csproj --no-restore --configuration Release
 
       - name: 5. Run OrderService Unit & Empirical Tests
         env:
@@ -51,3 +53,4 @@ jobs:
           docker build -t auth-service:ci AuthService/
           docker build -t catalog-service:ci CatalogService/
           docker build -t order-service:ci OrderService/
+          docker build -t payment-service:ci PaymentService/

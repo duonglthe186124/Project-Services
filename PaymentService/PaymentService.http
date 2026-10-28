@@ -1,0 +1,48 @@
+@PaymentService_HostAddress = http://localhost:5268
+@JwtToken = YOUR_JWT_TOKEN_HERE
+@OrderId = 6ae070270a702223a9525732
+@OrderCode = ADI-20261027-ENGAW2
+@SePayApiKey = sepay_adidas_secret_2026
+
+### 1. Chọn Thanh toán khi nhận hàng (COD) -> Tự động duyệt đơn + Sinh mã vận đơn + Gửi Email
+POST {{PaymentService_HostAddress}}/api/payments/process-cod
+Authorization: Bearer {{JwtToken}}
+Content-Type: application/json
+
+{
+  "orderId": "{{OrderId}}",
+  "orderCode": "{{OrderCode}}",
+  "amount": 2800000
+}
+
+### 2. Chọn Thanh toán Online QR -> Sinh link ảnh VietQR.io chuẩn Napas247
+POST {{PaymentService_HostAddress}}/api/payments/create-qr
+Authorization: Bearer {{JwtToken}}
+Content-Type: application/json
+
+{
+  "orderId": "{{OrderId}}",
+  "orderCode": "{{OrderCode}}",
+  "amount": 2800000
+}
+
+### 3. Giả lập SePay.vn bắn Webhook khi khách quét QR chuyển tiền thành công
+POST {{PaymentService_HostAddress}}/api/payments/webhook/sepay
+Authorization: Apikey {{SePayApiKey}}
+Content-Type: application/json
+
+{
+  "id": 900101,
+  "gateway": "MBBank",
+  "transactionDate": "2026-10-27 20:00:00",
+  "accountNumber": "0987654321",
+  "content": "CHUYEN TIEN {{OrderCode}} ADIDAS",
+  "transferType": "in",
+  "transferAmount": 2800000,
+  "referenceCode": "FT26300123456"
+}
+
+### 4. Tra cứu lịch sử giao dịch thanh toán của đơn hàng
+GET {{PaymentService_HostAddress}}/api/payments/order/{{OrderId}}
+Authorization: Bearer {{JwtToken}}
+Accept: application/json
