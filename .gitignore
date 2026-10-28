@@ -485,3 +485,6 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# System State & Sensitive Local Files
+PROJECT_STATE.md
